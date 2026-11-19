@@ -1,13 +1,16 @@
-//! メダル射出（要件16.2、基本設計 4.4）。
-
-use std::time::Duration;
+//! メダル射出（要件16.2、基本設計 4.4, 6.4）。
+//!
+//! 発射ボタンは継続的な意図であり、要求ではない。意図がある間は毎tickこれを呼び、
+//! 発射条件（クールダウン）が成立したときだけ発射する。成立していなければ `Ok(None)`。
+//! クールダウン中に発射しないことは却下ではない。発射した事実だけを `MedalLaunched` で通知する。
 
 use domain::{
     event::DomainEvent,
-    launch::{CatapultState, LaunchError, LaunchPlan},
+    launch::{CatapultState, LaunchPlan},
     session::{GameSession, GameSessionError},
     spec::{MedalType, SpecCatalog},
     stage::Stage,
+    time::Tick,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -16,13 +19,11 @@ pub struct LaunchOutput {
     pub event: DomainEvent,
 }
 
-/// いずれも「操作の拒否」。呼び出し側で `match` し、エラーハンドラへ流さない（基本設計 8.2）。
+/// 発射の前提が崩れている場合（終了後のセッション、定義データの欠落）。
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum LaunchMedalError {
     #[error(transparent)]
     Session(#[from] GameSessionError),
-    #[error(transparent)]
-    Launch(#[from] LaunchError),
     #[error("no spec for {0:?} medal")]
     NoSpec(MedalType),
 }
@@ -32,15 +33,16 @@ pub fn launch_medal(
     stage: &Stage,
     state: &mut CatapultState,
     specs: &SpecCatalog,
-    now: Duration,
-) -> Result<LaunchOutput, LaunchMedalError> {
+    now: Tick,
+) -> Result<Option<LaunchOutput>, LaunchMedalError> {
     session.ensure_playing()?;
     let medal = state.selected();
     let spec = session
         .medal_spec(medal, specs)
         .ok_or(LaunchMedalError::NoSpec(medal))?;
-    let plan = state.fire(stage.catapult(), &spec, now)?;
-    Ok(LaunchOutput { plan, event: DomainEvent::MedalLaunched { medal } })
+    Ok(state
+        .fire(stage.catapult(), &spec, now)
+        .map(|plan| LaunchOutput { plan, event: DomainEvent::MedalLaunched { medal } }))
 }
 
 #[cfg(test)]
@@ -66,8 +68,9 @@ mod tests {
             .expect("playing");
         let mut state = CatapultState::default();
 
-        let out =
-            launch_medal(&session, &stage, &mut state, &specs, Duration::ZERO).expect("launched");
+        let out = launch_medal(&session, &stage, &mut state, &specs, Tick(0))
+            .expect("playing")
+            .expect("ready");
 
         assert_eq!(out.event, DomainEvent::MedalLaunched { medal: MedalType::Normal });
         assert_eq!(out.plan.spec.mass.get(), medal_spec().mass.get() * 3.0);
@@ -75,32 +78,37 @@ mod tests {
     }
 
     #[rstest]
-    fn second_launch_within_cooldown_is_rejected(
+    fn no_launch_while_cooling_down_is_not_an_error(
         session: GameSession,
         stage: Stage,
         specs: SpecCatalog,
     ) {
         let mut state = CatapultState::default();
-        launch_medal(&session, &stage, &mut state, &specs, Duration::ZERO).expect("first");
-        assert!(matches!(
-            launch_medal(&session, &stage, &mut state, &specs, Duration::from_millis(10)),
-            Err(LaunchMedalError::Launch(LaunchError::CoolingDown { .. }))
-        ));
+        launch_medal(&session, &stage, &mut state, &specs, Tick(0))
+            .expect("playing")
+            .expect("first");
+        assert_eq!(launch_medal(&session, &stage, &mut state, &specs, Tick(1)), Ok(None));
+        let next = state.next_fire();
+        assert!(
+            launch_medal(&session, &stage, &mut state, &specs, next)
+                .expect("playing")
+                .is_some()
+        );
     }
 
     #[rstest]
-    fn launch_after_game_over_is_rejected_without_firing(
+    fn launch_after_game_over_fails_without_firing(
         mut session: GameSession,
         stage: Stage,
         specs: SpecCatalog,
     ) {
-        let enemy = session.tick(&stage, Duration::ZERO)[0].enemy;
+        let enemy = session.advance(&stage, Tick(0))[0].enemy;
         session.enemy_reached_goal(enemy, GoalId(1));
         let mut state = CatapultState::default();
         let before = state.clone();
 
         assert_eq!(
-            launch_medal(&session, &stage, &mut state, &specs, Duration::ZERO),
+            launch_medal(&session, &stage, &mut state, &specs, Tick(0)),
             Err(LaunchMedalError::Session(GameSessionError::NotPlaying(
                 session.status()
             )))
@@ -110,12 +118,12 @@ mod tests {
     }
 
     #[rstest]
-    fn medal_without_spec_is_rejected(session: GameSession, stage: Stage, specs: SpecCatalog) {
+    fn medal_without_spec_fails(session: GameSession, stage: Stage, specs: SpecCatalog) {
         let mut state = CatapultState::default();
         state.select(MedalType::Special(SpecialKind::Fire));
         let before = state.clone();
         assert_eq!(
-            launch_medal(&session, &stage, &mut state, &specs, Duration::ZERO),
+            launch_medal(&session, &stage, &mut state, &specs, Tick(0)),
             Err(LaunchMedalError::NoSpec(MedalType::Special(SpecialKind::Fire)))
         );
         assert_eq!(state, before);
@@ -135,8 +143,9 @@ mod tests {
         let mut state = CatapultState::default();
         state.select(heavy);
 
-        let out =
-            launch_medal(&session, &stage, &mut state, &specs, Duration::ZERO).expect("launched");
+        let out = launch_medal(&session, &stage, &mut state, &specs, Tick(0))
+            .expect("playing")
+            .expect("ready");
 
         assert_eq!(out.event, DomainEvent::MedalLaunched { medal: heavy });
         assert_eq!(out.plan.medal, heavy);

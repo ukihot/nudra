@@ -8,5 +8,6 @@
   "defeated": "撃破数 {{defeated}}",
   "best_record": "最高記録 {{best}}",
   "new_record": "新記録！  最高記録 {{best}}",
+  "play_time": "プレイ時間 {{time}}",
   "continue": "クリックまたはEnterで戻る"
 }

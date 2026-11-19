@@ -6,6 +6,7 @@ mod feedback;
 mod hud;
 mod input;
 pub mod keys;
+pub mod play_time;
 mod select;
 mod visuals;
 

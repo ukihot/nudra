@@ -1,6 +1,6 @@
 //! applicationのテスト用フィクスチャとモック。
 
-use std::{collections::HashMap, time::Duration};
+use std::collections::HashMap;
 
 use domain::{
     id::{BridgeId, EnemyTypeId, GameSessionId, GoalId, PusherCharacterId, RailId, StageId},
@@ -14,6 +14,7 @@ use domain::{
         Abyss, Bridge, Catapult, Geometry, Goal, InitialMedalPlacement, Rail, Shape, SpawnEntry,
         Stage, StageParts, Wave, WavePlan,
     },
+    time::Ticks,
 };
 use rstest::fixture;
 
@@ -31,9 +32,9 @@ mockall::mock! {
     }
 }
 
-pub fn spawn(at_secs: u64) -> SpawnEntry {
+pub fn spawn(at_tick: u64) -> SpawnEntry {
     SpawnEntry {
-        at: Duration::from_secs(at_secs),
+        at: Ticks(at_tick),
         enemy: EnemyTypeId::new("grunt"),
         bridge: BridgeId(1),
         goal: GoalId(1),
@@ -48,15 +49,8 @@ pub fn stage() -> Stage {
             shape: Shape::Rectangle { width: p(10.0), depth: p(10.0) },
             floor_y: 0.0,
         },
-        catapult: Catapult::new(
-            Vec3::new(0.0, 1.0, 5.0),
-            0.0,
-            (-0.5, 0.5),
-            0.2,
-            10.0,
-            Duration::from_millis(200),
-        )
-        .expect("valid catapult"),
+        catapult: Catapult::new(Vec3::new(0.0, 1.0, 5.0), 0.0, (-0.5, 0.5), 0.2, 10.0, Ticks(12))
+            .expect("valid catapult"),
         bridges: vec![Bridge {
             id: BridgeId(1),
             entry: Vec3::X * 10.0,
@@ -77,7 +71,7 @@ pub fn stage() -> Stage {
             radius: p(1.0),
         }],
         initial_medals: vec![InitialMedalPlacement::grid(Vec3::ZERO, 2, 2, 1, Vec3::ONE)],
-        wave_plan: WavePlan::new(vec![Wave::new(vec![spawn(0), spawn(1)])]),
+        wave_plan: WavePlan::new(vec![Wave::new(vec![spawn(0), spawn(60)])]),
     })
     .expect("valid stage")
 }

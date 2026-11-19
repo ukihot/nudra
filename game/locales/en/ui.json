@@ -8,5 +8,6 @@
   "defeated": "Defeated {{defeated}}",
   "best_record": "Best {{best}}",
   "new_record": "NEW RECORD!  Best {{best}}",
+  "play_time": "Time {{time}}",
   "continue": "Click or press Enter"
 }

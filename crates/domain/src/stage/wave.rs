@@ -1,11 +1,12 @@
-use std::time::Duration;
+use crate::{
+    id::{BridgeId, EnemyTypeId, GoalId},
+    time::Ticks,
+};
 
-use crate::id::{BridgeId, EnemyTypeId, GoalId};
-
-/// 敵の出現エントリ。`at` はWave開始からの経過時間。
+/// 敵の出現エントリ。`at` はWave開始からの経過Tick。
 #[derive(Debug, Clone, PartialEq)]
 pub struct SpawnEntry {
-    pub at: Duration,
+    pub at: Ticks,
     pub enemy: EnemyTypeId,
     pub bridge: BridgeId,
     pub goal: GoalId,

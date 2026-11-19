@@ -5,7 +5,7 @@ use bevy_intl::I18nText;
 
 use super::keys::{Arg, Ui};
 use crate::{
-    port::{CharacterRoster, StartRequested},
+    port::{CharacterRoster, Request, SubmitRequest},
     state::AppState,
 };
 
@@ -70,8 +70,8 @@ fn spawn_menu(mut commands: Commands, roster: Res<CharacterRoster>) {
                 BackgroundColor(Color::srgb(0.16, 0.2, 0.14)),
                 children![label(caption, 28.0, Color::srgb(0.92, 0.92, 0.85))],
             ))
-            .observe(move |_: On<PointerClick>, mut start: MessageWriter<StartRequested>| {
-                start.write(StartRequested { character: character.clone() });
+            .observe(move |_: On<PointerClick>, mut submit: MessageWriter<SubmitRequest>| {
+                submit.write(SubmitRequest(Request::Start { character: character.clone() }));
             })
             .id();
         commands.entity(root).add_child(button);
@@ -81,10 +81,10 @@ fn spawn_menu(mut commands: Commands, roster: Res<CharacterRoster>) {
 fn select_with_keys(
     keys: Res<ButtonInput<KeyCode>>,
     roster: Res<CharacterRoster>,
-    mut start: MessageWriter<StartRequested>,
+    mut submit: MessageWriter<SubmitRequest>,
 ) {
     let picked = NUMBER_KEYS.iter().position(|&k| keys.just_pressed(k));
     if let Some(entry) = picked.and_then(|i| roster.0.get(i)) {
-        start.write(StartRequested { character: entry.id.clone() });
+        submit.write(SubmitRequest(Request::Start { character: entry.id.clone() }));
     }
 }

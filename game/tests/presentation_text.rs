@@ -1,6 +1,7 @@
 //! Presentation層の文字列の規約（CLAUDE.md）。
 //! - 表示文はロケールのカタログ（game/locales/<言語>/ui.json）に書き、コードに書かない。
 //! - キー・引数名・アセットのパスは presentation/keys.rs だけに置く。
+//! - 例外: presentation/play_time.rs だけは、数値の書式指定のリテラル（文言を含まない）を許可する。
 
 use std::{collections::BTreeSet, fs, path::Path};
 
@@ -10,6 +11,37 @@ const SRC: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
 const LOCALES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/locales");
 /// 文字列を置いてよい唯一のファイル
 const ALLOWED: &str = "keys.rs";
+/// 数値の書式指定のリテラルだけを許可するファイル
+const FORMAT_ONLY: &str = "play_time.rs";
+
+/// 行の中の文字列リテラルの中身（`"…"`）を取り出す。
+fn literals(code: &str) -> Vec<&str> {
+    code.split('"').skip(1).step_by(2).collect()
+}
+
+/// `{…}` の置き換え部分を除いて、英字も非ASCII（日本語など）も含まない＝文言ではなく数値の書式。
+fn is_format_only(literal: &str) -> bool {
+    let mut depth = 0usize;
+    literal.chars().all(|c| {
+        match c {
+            '{' => depth += 1,
+            '}' => depth = depth.saturating_sub(1),
+            _ if depth > 0 => {},
+            c if c.is_alphabetic() || !c.is_ascii() => return false,
+            _ => {},
+        }
+        true
+    })
+}
+
+#[test]
+fn format_only_rule_accepts_numbers_and_rejects_words() {
+    assert!(is_format_only("{minutes:02}:{seconds:02}.{hundredths:02}"));
+    assert!(is_format_only("00:01.01"));
+    assert!(!is_format_only("Time {t}"));
+    assert!(!is_format_only("プレイ時間"));
+    assert!(!is_format_only("{a}x"));
+}
 
 #[test]
 fn presentation_has_no_string_literals() {
@@ -26,12 +58,19 @@ fn presentation_has_no_string_literals() {
         .iter()
         .filter(|path| path.file_name().is_some_and(|name| name != ALLOWED))
         .flat_map(|path| {
+            let format_only = path
+                .file_name()
+                .is_some_and(|name| name == FORMAT_ONLY);
             let source = fs::read_to_string(path).expect("readable");
             source
                 .lines()
                 .enumerate()
                 // コメント（`//` 以降）は対象外
-                .filter(|(_, line)| line.split("//").next().is_some_and(|code| code.contains('"')))
+                .filter(|(_, line)| {
+                    let code = line.split("//").next().unwrap_or_default();
+                    code.contains('"')
+                        && !(format_only && literals(code).iter().all(|l| is_format_only(l)))
+                })
                 .map(|(no, line)| format!("{}:{}: {}", path.display(), no + 1, line.trim()))
                 .collect::<Vec<_>>()
         })

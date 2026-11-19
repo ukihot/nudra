@@ -105,7 +105,7 @@ mod tests {
         specs: SpecCatalog,
         character: PusherCharacter,
     ) {
-        session.tick(&stage, std::time::Duration::ZERO);
+        session.advance(&stage, domain::time::Tick(0));
         session.enemy_reached_goal(EnemyId(1), GoalId(1));
         assert_eq!(
             level_up(

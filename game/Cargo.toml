@@ -30,6 +30,8 @@ rstest.workspace = true
 proptest.workspace = true
 tempfile.workspace = true
 serde_json.workspace = true
+# テストでは実行時エラーを即失敗にするため、エラーに System 名が出るようにする
+bevy = { workspace = true, features = ["debug"] }
 
 [lints]
 workspace = true

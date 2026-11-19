@@ -49,7 +49,6 @@ pub fn record_result(
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
 
     use domain::id::{EnemyId, GoalId, PusherCharacterId, StageId};
     use mockall::predicate::eq;
@@ -132,7 +131,7 @@ mod tests {
 
     #[rstest]
     fn finished_session_is_recorded(mut session: GameSession, stage: domain::stage::Stage) {
-        session.tick(&stage, Duration::from_secs(1));
+        session.advance(&stage, domain::time::Tick(60));
         session.enemy_fell(EnemyId(1));
         session.enemy_reached_goal(EnemyId(2), GoalId(1));
         let mut progress = PlayerProgress::default();

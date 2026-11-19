@@ -34,7 +34,6 @@ pub fn resolve_physics(
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
 
     use PhysicsFact::{EnemyEnteredAbyss as Fell, EnemyEnteredGoal as Goal};
     use domain::{session::GameStatus, stage::Stage};
@@ -45,7 +44,7 @@ mod tests {
     use crate::test_support::{character, session, stage};
 
     fn with_two_enemies(mut session: GameSession, stage: &Stage) -> GameSession {
-        session.tick(stage, Duration::from_secs(1));
+        session.advance(stage, domain::time::Tick(60));
         session
     }
 

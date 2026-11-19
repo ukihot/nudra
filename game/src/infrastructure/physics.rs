@@ -57,15 +57,18 @@ const PUSHER_MAX_LEAD: f32 = 0.6;
 
 /// センサーの接触開始と安全高度から、ゲーム判定に必要な事実を集める。
 /// 奈落に落ちたメダルはDomainへ渡さず、その場で除去する（基本設計 5.4）。
+#[allow(clippy::too_many_arguments)]
 pub fn collect_facts(
     mut collisions: MessageReader<CollisionStart>,
     zones: Query<(Has<AbyssZone>, Option<&GoalZone>)>,
     enemies: Query<&Enemy>,
     medals: Query<(), With<MedalKind>>,
-    fallen: Query<(Entity, &Position, Option<&Enemy>), Or<(With<Enemy>, With<MedalKind>)>>,
+    fallen_enemies: Query<(&Position, &Enemy)>,
+    fallen_medals: Query<(Entity, &Position), With<MedalKind>>,
     kill_y: Res<KillPlane>,
     mut facts: ResMut<PendingFacts>,
     mut commands: Commands,
+    par_commands: ParallelCommands,
 ) {
     for c in collisions.read() {
         for (zone, other) in [(c.collider1, c.collider2), (c.collider2, c.collider1)] {
@@ -85,14 +88,22 @@ pub fn collect_facts(
             }
         }
     }
-    for (entity, position, enemy) in &fallen {
+    // 敵は数が少なく、事実を順に積むため逐次で調べる
+    for (position, enemy) in &fallen_enemies {
         if position.y < kill_y.0 {
-            match enemy {
-                Some(enemy) => facts.0.push(PhysicsFact::EnemyEnteredAbyss(enemy.id)),
-                None => commands.entity(entity).try_despawn(),
-            }
+            facts.0.push(PhysicsFact::EnemyEnteredAbyss(enemy.id));
         }
     }
+    // メダルは数千枚になり得るため並列に調べる（共有の可変状態を持たず、除去は ParallelCommands
+    // で）
+    let kill_y = kill_y.0;
+    fallen_medals
+        .par_iter()
+        .for_each(|(entity, position)| {
+            if position.y < kill_y {
+                par_commands.command_scope(|mut commands| commands.entity(entity).try_despawn());
+            }
+        });
 }
 
 /// これより下に落ちた物体を除去する高さ。
@@ -119,13 +130,16 @@ pub fn despawn_enemies(
 
 /// 敵: 経路の進行方向へ、最大速度に達するまで歩行力を加える。
 /// 速度を直接上書きしないため、メダルに押し流される挙動が残る（要件7.1）。
+/// 各敵の計算は独立しているため並列に処理する。
 pub fn walk_enemies(mut enemies: Query<(&mut Navigation, &Walker, Forces)>) {
-    for (mut nav, walker, mut forces) in &mut enemies {
-        let direction = nav.0.steer(forces.position());
-        if forces.linear_velocity().dot(direction) < walker.max_speed {
-            forces.apply_force(direction * walker.walk_force);
-        }
-    }
+    enemies
+        .par_iter_mut()
+        .for_each(|(mut nav, walker, mut forces)| {
+            let direction = nav.0.steer(forces.position());
+            if forces.linear_velocity().dot(direction) < walker.max_speed {
+                forces.apply_force(direction * walker.walk_force);
+            }
+        });
 }
 
 /// Pusher: Rail上の目標点へ、最大推力＝押し出し力の制御力で追従する（基本設計 5.4）。

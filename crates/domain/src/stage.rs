@@ -200,12 +200,10 @@ fn ensure_unique(kind: &'static str, ids: impl IntoIterator<Item = u16>) -> Resu
 
 #[cfg(test)]
 pub(crate) mod fixture {
-    use std::time::Duration;
-
     use rstest::fixture;
 
     use super::*;
-    use crate::{id::EnemyTypeId, positive::fixture::p};
+    use crate::{id::EnemyTypeId, positive::fixture::p, time::Ticks};
 
     #[fixture]
     pub fn parts() -> StageParts {
@@ -221,7 +219,7 @@ pub(crate) mod fixture {
                 (-0.5, 0.5),
                 0.2,
                 10.0,
-                Duration::from_millis(200),
+                Ticks(12),
             )
             .expect("valid catapult"),
             bridges: vec![Bridge {
@@ -243,7 +241,7 @@ pub(crate) mod fixture {
                 radius: p(1.0),
             }],
             initial_medals: vec![InitialMedalPlacement::grid(Vec3::ZERO, 2, 2, 1, Vec3::ONE)],
-            wave_plan: WavePlan::new(vec![Wave::new(vec![spawn(0, 1, 1), spawn(1, 1, 1)])]),
+            wave_plan: WavePlan::new(vec![Wave::new(vec![spawn(0, 1, 1), spawn(60, 1, 1)])]),
         }
     }
 
@@ -252,9 +250,9 @@ pub(crate) mod fixture {
         Stage::new(parts).expect("valid stage")
     }
 
-    pub fn spawn(at_secs: u64, bridge: u16, goal: u16) -> SpawnEntry {
+    pub fn spawn(at_tick: u64, bridge: u16, goal: u16) -> SpawnEntry {
         SpawnEntry {
-            at: Duration::from_secs(at_secs),
+            at: Ticks(at_tick),
             enemy: EnemyTypeId::new("grunt"),
             bridge: BridgeId(bridge),
             goal: GoalId(goal),

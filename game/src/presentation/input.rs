@@ -1,11 +1,14 @@
-//! 入力 → 要求Message（基本設計 11章）。キーボード・マウス・タッチを同じ操作に対応付ける。
-//! 状態の変更はしない。照準の表示は読み取りモデル `AimModel` から描く。
+//! 入力 → 操作の意図（基本設計 6.4, 11章）。キーボード・マウス・タッチを同じ操作に対応付ける。
+//!
+//! 旋回と発射ボタンは要求ではなく意図（`ControlIntent`）として書く。
+//! 押しっぱなしでも要求は増えない。 実際に発射するかは Infrastructure が固定ステップで
+//! Domain（クールダウン）に問い合わせて決める。
 
 use bevy::prelude::*;
 
 use crate::{
-    port::{AimModel, AimRequested, LaunchRequested},
-    state::AppState,
+    port::{AimModel, ControlIntent},
+    state::{AppState, GamePhase},
 };
 
 /// キー押下中の旋回速度（rad/s）
@@ -17,37 +20,34 @@ const AIM_GUIDE_LENGTH: f32 = 3.5;
 pub(super) fn plugin(app: &mut App) {
     app.add_systems(
         Update,
-        (read_controls, draw_aim_guide).run_if(in_state(AppState::InGame)),
-    );
+        (write_intent, draw_aim_guide).run_if(in_state(GamePhase::Running)),
+    )
+    .add_systems(OnExit(AppState::InGame), release_intent);
     #[cfg(debug_assertions)]
-    app.add_systems(Update, debug_level_up.run_if(in_state(AppState::InGame)));
+    app.add_systems(Update, debug_level_up.run_if(in_state(GamePhase::Running)));
 }
 
-fn read_controls(
+fn write_intent(
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
     touches: Res<Touches>,
     time: Res<Time>,
-    mut aim: MessageWriter<AimRequested>,
-    mut launch: MessageWriter<LaunchRequested>,
+    mut intent: ResMut<ControlIntent>,
 ) {
     let pressed = |a, b| keys.pressed(a) || keys.pressed(b);
     // +yaw は左回り（画面左）
     let steer = f32::from(u8::from(pressed(KeyCode::ArrowLeft, KeyCode::KeyA)))
         - f32::from(u8::from(pressed(KeyCode::ArrowRight, KeyCode::KeyD)));
     let drag: f32 = touches.iter().map(|t| t.delta().x).sum();
-    let delta = steer * AIM_SPEED * time.delta_secs() - drag * TOUCH_AIM_PER_PX;
-    if delta != 0.0 {
-        aim.write(AimRequested { delta });
-    }
-
-    // 押している間は要求し続ける。実際の連射間隔はDomainのクールダウンが決める
-    let firing = keys.pressed(KeyCode::Space)
+    // 固定ステップが読むまで旋回量を貯める（フレームと固定ステップの回数が一致しなくても失われない）
+    intent.aim += steer * AIM_SPEED * time.delta_secs() - drag * TOUCH_AIM_PER_PX;
+    intent.fire = keys.pressed(KeyCode::Space)
         || mouse.pressed(MouseButton::Left)
         || touches.iter().next().is_some();
-    if firing {
-        launch.write(LaunchRequested);
-    }
+}
+
+fn release_intent(mut intent: ResMut<ControlIntent>) {
+    *intent = ControlIntent::default();
 }
 
 fn draw_aim_guide(aim: Res<AimModel>, mut gizmos: Gizmos) {
@@ -57,13 +57,15 @@ fn draw_aim_guide(aim: Res<AimModel>, mut gizmos: Gizmos) {
     }
 }
 
-/// 【仮】成長の選択方式は未確定のため、開発ビルドだけ数字キーで強化を試せるようにする。
+/// 【仮】成長の選択方式は未確定のため、開発ビルドだけ数字キーで強化の指図を出せるようにする。
 #[cfg(debug_assertions)]
 fn debug_level_up(
     keys: Res<ButtonInput<KeyCode>>,
-    mut requests: MessageWriter<crate::port::LevelUpRequested>,
+    mut submit: MessageWriter<crate::port::SubmitRequest>,
 ) {
     use domain::{positive::Positive, session::Upgrade, spec::MedalType};
+
+    use crate::port::{Request, SubmitRequest};
     let choices: [(KeyCode, f32, fn(Positive) -> Upgrade); 3] = [
         (KeyCode::Digit1, 1.5, |factor| Upgrade::MedalMass {
             medal: MedalType::Normal,
@@ -76,7 +78,7 @@ fn debug_level_up(
         if keys.just_pressed(key)
             && let Ok(factor) = Positive::new(factor)
         {
-            requests.write(crate::port::LevelUpRequested(upgrade(factor)));
+            submit.write(SubmitRequest(Request::LevelUp(upgrade(factor))));
         }
     }
 }

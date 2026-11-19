@@ -1,7 +1,7 @@
 //! 定義データ（RON）の読込・Domainへの変換・Catalog（基本設計 5.5, 3.11）。
 //! DTOとDomainは分離し、Domainの型にはserdeを付けない。
 
-use std::{collections::HashMap, time::Duration};
+use std::collections::HashMap;
 
 use anyhow::{Context, bail};
 // Bevy 0.20 の prelude は `ContextExt`（`.context()`）を含み `anyhow::Context`
@@ -25,9 +25,11 @@ use domain::{
         Abyss, Bridge, Catapult, Geometry, Goal, InitialMedalPlacement, Rail, Shape, SpawnEntry,
         Stage, StageError, StageParts, Wave, WavePlan,
     },
+    time::Ticks,
 };
 use serde::Deserialize;
 
+use super::session::TICK_HZ;
 use crate::{
     port::{CharacterRoster, RosterEntry},
     ron_asset,
@@ -204,7 +206,7 @@ impl StageAsset {
                 (c.yaw_range_deg.0.to_radians(), c.yaw_range_deg.1.to_radians()),
                 c.pitch_deg.to_radians(),
                 c.speed,
-                Duration::from_millis(c.cooldown_ms),
+                Ticks::from_millis_ceil(c.cooldown_ms, TICK_HZ),
             )?,
             bridges: self
                 .bridges
@@ -259,7 +261,7 @@ impl StageAsset {
                         Wave::new(
                             wave.iter()
                                 .map(|s| SpawnEntry {
-                                    at: Duration::from_millis(s.at_ms),
+                                    at: Ticks::from_millis_ceil(s.at_ms, TICK_HZ),
                                     enemy: EnemyTypeId::new(&s.enemy),
                                     bridge: BridgeId(s.bridge),
                                     goal: GoalId(s.goal),

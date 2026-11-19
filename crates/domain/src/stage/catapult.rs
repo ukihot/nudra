@@ -1,7 +1,8 @@
-use std::time::Duration;
-
 use super::StageError;
-use crate::math::{EulerRot, Quat, Vec3};
+use crate::{
+    math::{EulerRot, Quat, Vec3},
+    time::Ticks,
+};
 
 /// 固定配置の射出装置。旋回角（yaw）はラジアン、基準方向 `base_yaw` からの相対値。
 #[derive(Debug, Clone, PartialEq)]
@@ -11,7 +12,7 @@ pub struct Catapult {
     yaw_range: (f32, f32),
     pitch: f32,
     speed: f32,
-    cooldown: Duration,
+    cooldown: Ticks,
 }
 
 impl Catapult {
@@ -21,7 +22,7 @@ impl Catapult {
         yaw_range: (f32, f32),
         pitch: f32,
         speed: f32,
-        cooldown: Duration,
+        cooldown: Ticks,
     ) -> Result<Self, StageError> {
         let (min, max) = yaw_range;
         if min > max {
@@ -40,7 +41,7 @@ impl Catapult {
     pub fn position(&self) -> Vec3 {
         self.position
     }
-    pub fn cooldown(&self) -> Duration {
+    pub fn cooldown(&self) -> Ticks {
         self.cooldown
     }
 
@@ -73,7 +74,7 @@ mod tests {
         #[case] range: (f32, f32),
         #[case] expected: Result<(), StageError>,
     ) {
-        let result = Catapult::new(Vec3::ZERO, 0.0, range, 0.0, 1.0, Duration::ZERO).map(|_| ());
+        let result = Catapult::new(Vec3::ZERO, 0.0, range, 0.0, 1.0, Ticks(0)).map(|_| ());
         assert_eq!(result, expected);
     }
 }

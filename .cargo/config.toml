@@ -2,3 +2,7 @@
 # その場所をビルドスクリプトへ伝える（relative = true でこのファイルの親フォルダからの絶対パスになる）。
 [env]
 BEVY_INTL_MESSAGES_DIR = { value = "game/locales", relative = true }
+
+# Windows x64: LLDでリンクを高速化
+[target.x86_64-pc-windows-msvc]
+linker = "rust-lld.exe"

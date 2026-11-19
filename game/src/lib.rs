@@ -16,6 +16,8 @@ use bevy::prelude::*;
 /// 描画を伴わない中核（状態・ポート・Infrastructure）。ヘッドレスのテストでも使う。
 /// `PhysicsPlugins` と、`AssetPlugin` などBevyの基盤Pluginは呼び出し側で追加する。
 pub fn core_plugin(app: &mut App) {
+    // ゲーム内の時刻（Tick）は固定ステップ1回で1つ進む（基本設計 6.5）
+    app.insert_resource(Time::<Fixed>::from_hz(f64::from(infrastructure::session::TICK_HZ)));
     app.add_plugins((state::plugin, port::plugin, infrastructure::plugin));
 }
 

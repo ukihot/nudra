@@ -27,11 +27,12 @@ pub enum Ui {
     Defeated,
     BestRecord,
     NewRecord,
+    PlayTime,
     Continue,
 }
 
 impl Ui {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::Title,
         Self::ChoosePusher,
         Self::CharacterEntry,
@@ -41,6 +42,7 @@ impl Ui {
         Self::Defeated,
         Self::BestRecord,
         Self::NewRecord,
+        Self::PlayTime,
         Self::Continue,
     ];
 
@@ -55,6 +57,7 @@ impl Ui {
             Self::Defeated => "defeated",
             Self::BestRecord => "best_record",
             Self::NewRecord => "new_record",
+            Self::PlayTime => "play_time",
             Self::Continue => "continue",
         }
     }
@@ -83,10 +86,11 @@ pub enum Arg {
     Defeated,
     Level,
     Best,
+    Time,
 }
 
 impl Arg {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Index,
         Self::Name,
         Self::Wave,
@@ -94,6 +98,7 @@ impl Arg {
         Self::Defeated,
         Self::Level,
         Self::Best,
+        Self::Time,
     ];
 
     pub const fn key(self) -> &'static str {
@@ -105,6 +110,7 @@ impl Arg {
             Self::Defeated => "defeated",
             Self::Level => "level",
             Self::Best => "best",
+            Self::Time => "time",
         }
     }
 }

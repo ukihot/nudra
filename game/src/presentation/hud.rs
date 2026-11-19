@@ -7,10 +7,11 @@ use domain::event::DomainEvent;
 
 use super::{
     keys::{Arg, Ui},
+    play_time::PlayTime,
     select::label,
 };
 use crate::{
-    port::{DomainEventMsg, GameResult, HudModel, MenuRequested},
+    port::{DomainEventMsg, GameResult, HudModel, Request, SubmitRequest},
     state::AppState,
 };
 
@@ -92,14 +93,17 @@ fn refresh_hud(
 }
 
 fn spawn_result(mut commands: Commands, result: Option<Res<GameResult>>, score: Res<Score>) {
-    let record = match result.as_deref() {
-        Some(GameResult::Lost { best_defeated, new_record: true, .. }) => {
-            Ui::NewRecord.with([(Arg::Best, best_defeated.to_string())])
+    // GameResult はリザルトへ移る前に必ず登録される。無い場合は今回の撃破数だけを出す
+    let (best, new_record, play_time) = match result.as_deref() {
+        Some(GameResult::Lost { best_defeated, new_record, play_time, .. }) => {
+            (*best_defeated, *new_record, PlayTime(*play_time).to_string())
         },
-        Some(GameResult::Lost { best_defeated, .. }) => {
-            Ui::BestRecord.with([(Arg::Best, best_defeated.to_string())])
-        },
-        None => Ui::BestRecord.with([(Arg::Best, score.defeated.to_string())]),
+        None => (score.defeated, false, String::new()),
+    };
+    let record = if new_record {
+        Ui::NewRecord
+    } else {
+        Ui::BestRecord
     };
     commands
         .spawn((
@@ -121,17 +125,22 @@ fn spawn_result(mut commands: Commands, result: Option<Res<GameResult>>, score: 
                     28.0,
                     Color::WHITE
                 ),
-                label(record, 24.0, Color::srgb(0.95, 0.8, 0.3)),
+                label(Ui::PlayTime.with([(Arg::Time, play_time)]), 24.0, Color::WHITE),
+                label(
+                    record.with([(Arg::Best, best.to_string())]),
+                    24.0,
+                    Color::srgb(0.95, 0.8, 0.3)
+                ),
                 label(Ui::Continue.text(), 20.0, Color::srgb(0.7, 0.7, 0.7)),
             ],
         ))
-        .observe(|_: On<PointerClick>, mut menu: MessageWriter<MenuRequested>| {
-            menu.write(MenuRequested);
+        .observe(|_: On<PointerClick>, mut submit: MessageWriter<SubmitRequest>| {
+            submit.write(SubmitRequest(Request::Menu));
         });
 }
 
-fn continue_with_keys(keys: Res<ButtonInput<KeyCode>>, mut menu: MessageWriter<MenuRequested>) {
+fn continue_with_keys(keys: Res<ButtonInput<KeyCode>>, mut submit: MessageWriter<SubmitRequest>) {
     if keys.any_just_pressed([KeyCode::Enter, KeyCode::Space]) {
-        menu.write(MenuRequested);
+        submit.write(SubmitRequest(Request::Menu));
     }
 }

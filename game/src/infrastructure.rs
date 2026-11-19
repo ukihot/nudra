@@ -4,6 +4,7 @@
 pub mod data;
 pub mod physics;
 pub mod progress;
+pub mod requests;
 pub mod save;
 pub mod session;
 pub mod world;

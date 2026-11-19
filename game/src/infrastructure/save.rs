@@ -16,7 +16,10 @@ use std::{
     fs,
     io::{self, Write},
     path::{Path, PathBuf},
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use bevy::{log::warn, prelude::Resource};
@@ -191,18 +194,19 @@ pub fn decode(bytes: &[u8]) -> Result<PlayerProgress, SaveFileError> {
 
 // ── Repository実装 ───────────────────────────────────────
 
-#[derive(Resource, Debug)]
+/// 書き込みタスクへ渡せるよう `Clone`。読み取り専用の判定はすべての複製で共有する。
+#[derive(Resource, Debug, Clone)]
 pub struct FileProgressRepository {
     path: PathBuf,
     /// 未来の版のファイルを読んだら立てる。以後の保存を拒否する
-    read_only: AtomicBool,
+    read_only: Arc<AtomicBool>,
 }
 
 impl FileProgressRepository {
     pub fn in_dir(dir: impl AsRef<Path>) -> Self {
         Self {
             path: dir.as_ref().join(FILE_NAME),
-            read_only: AtomicBool::new(false),
+            read_only: Arc::new(AtomicBool::new(false)),
         }
     }
 

@@ -2,7 +2,7 @@
 
 mod level;
 
-use std::{collections::HashSet, time::Duration};
+use std::collections::HashSet;
 
 pub use level::{LevelProgress, Upgrade, UpgradeError};
 
@@ -12,6 +12,7 @@ use crate::{
     pusher::{PusherCharacter, PusherStats},
     spec::{MedalSpec, MedalType, SpecCatalog},
     stage::Stage,
+    time::Tick,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -45,7 +46,8 @@ pub struct SpawnOrder {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct WaveProgress {
     wave: usize,
-    elapsed: Duration,
+    /// 現Waveを開始したTick。出現は「開始Tick + 出現オフセット ≦ 現在のTick」で決まる
+    started_at: Tick,
     next: usize,
 }
 
@@ -128,9 +130,9 @@ impl GameSession {
         }
     }
 
-    /// Wave進行。Playing以外では何もしない。
-    /// 現Waveの出現が終わり、かつ生存敵がいなくなったら次のWaveへ進む。
-    pub fn tick(&mut self, stage: &Stage, dt: Duration) -> Vec<SpawnOrder> {
+    /// 現在のTickまでに出現すべき敵を出す。Playing以外では何もしない。
+    /// 現Waveの出現が終わり、かつ生存敵がいなくなったら、そのTickから次のWaveを始める。
+    pub fn advance(&mut self, stage: &Stage, now: Tick) -> Vec<SpawnOrder> {
         if self.ensure_playing().is_err() {
             return Vec::new();
         }
@@ -138,15 +140,14 @@ impl GameSession {
         let Some(wave) = waves.get(self.waves.wave) else {
             return Vec::new();
         };
-        self.waves.elapsed += dt;
-
-        let due: Vec<_> = wave.spawns()[self.waves.next..]
+        let started = self.waves.started_at;
+        let pending = &wave.spawns()[self.waves.next..];
+        let due = pending
             .iter()
-            .take_while(|s| s.at <= self.waves.elapsed)
-            .collect();
-        self.waves.next += due.len();
-        let orders = due
-            .into_iter()
+            .take_while(|s| started + s.at <= now)
+            .count();
+        let orders = pending[..due]
+            .iter()
             .map(|s| {
                 let enemy = EnemyId(self.next_enemy_id);
                 self.next_enemy_id += 1;
@@ -159,6 +160,7 @@ impl GameSession {
                 }
             })
             .collect();
+        self.waves.next += due;
 
         if self.waves.next >= wave.spawns().len()
             && self.alive_enemies.is_empty()
@@ -166,7 +168,8 @@ impl GameSession {
         {
             self.waves = WaveProgress {
                 wave: self.waves.wave + 1,
-                ..WaveProgress::default()
+                started_at: now,
+                next: 0,
             };
         }
         orders
@@ -275,14 +278,10 @@ mod tests {
     #[rstest]
     fn tick_spawns_enemies_on_schedule(started: (GameSession, Stage)) {
         let (mut session, stage) = started;
-        let first = session.tick(&stage, Duration::from_millis(500));
+        let first = session.advance(&stage, Tick(30));
         assert_eq!(first.iter().map(|o| o.enemy).collect::<Vec<_>>(), [EnemyId(1)]);
-        assert!(
-            session
-                .tick(&stage, Duration::from_millis(400))
-                .is_empty()
-        );
-        assert_eq!(session.tick(&stage, Duration::from_millis(100))[0].enemy, EnemyId(2));
+        assert!(session.advance(&stage, Tick(59)).is_empty());
+        assert_eq!(session.advance(&stage, Tick(60))[0].enemy, EnemyId(2));
         assert_eq!(session.alive_enemy_count(), 2);
     }
 
@@ -294,18 +293,39 @@ mod tests {
         let stage = Stage::new(parts).expect("valid");
         let (mut session, _) = GameSession::start(GameSessionId(1), &stage, &character());
 
-        let enemy = session.tick(&stage, Duration::ZERO)[0].enemy;
+        let enemy = session.advance(&stage, Tick(0))[0].enemy;
         assert_eq!(session.waves().wave(), 0, "enemy still alive");
         session.enemy_fell(enemy);
-        assert!(session.tick(&stage, Duration::ZERO).is_empty());
+        assert!(session.advance(&stage, Tick(0)).is_empty());
         assert_eq!(session.waves().wave(), 1);
-        assert_eq!(session.tick(&stage, Duration::ZERO)[0].enemy, EnemyId(2));
+        assert_eq!(session.advance(&stage, Tick(0))[0].enemy, EnemyId(2));
+    }
+
+    /// 次のWaveの出現時刻は、そのWaveを始めたTickからの相対で決まる。
+    #[rstest]
+    fn next_wave_timing_is_relative_to_its_start(parts: StageParts) {
+        let mut parts = parts;
+        parts.wave_plan = WavePlan::new(vec![
+            Wave::new(vec![spawn(0, 1, 1)]),
+            Wave::new(vec![spawn(30, 1, 1)]),
+        ]);
+        let stage = Stage::new(parts).expect("valid");
+        let (mut session, _) = GameSession::start(GameSessionId(1), &stage, &character());
+
+        let enemy = session.advance(&stage, Tick(0))[0].enemy;
+        session.enemy_fell(enemy);
+        assert!(
+            session.advance(&stage, Tick(100)).is_empty(),
+            "wave 2 starts at tick 100"
+        );
+        assert!(session.advance(&stage, Tick(129)).is_empty());
+        assert_eq!(session.advance(&stage, Tick(130)).len(), 1);
     }
 
     #[rstest]
     fn enemy_reaching_goal_loses_the_game(started: (GameSession, Stage)) {
         let (mut session, stage) = started;
-        let enemy = session.tick(&stage, Duration::ZERO)[0].enemy;
+        let enemy = session.advance(&stage, Tick(0))[0].enemy;
         assert_eq!(
             session.enemy_reached_goal(enemy, GoalId(1)),
             [
@@ -319,7 +339,7 @@ mod tests {
     #[rstest]
     fn results_and_requests_after_loss_are_ignored_or_rejected(started: (GameSession, Stage)) {
         let (mut session, stage) = started;
-        session.tick(&stage, Duration::from_secs(1));
+        session.advance(&stage, Tick(60));
         session.enemy_reached_goal(EnemyId(1), GoalId(1));
         let lost = session.status();
 
@@ -329,11 +349,7 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(session.enemy_fell(EnemyId(2)), None);
-        assert!(
-            session
-                .tick(&stage, Duration::from_secs(10))
-                .is_empty()
-        );
+        assert!(session.advance(&stage, Tick(600)).is_empty());
         assert_eq!(session.ensure_playing(), Err(GameSessionError::NotPlaying(lost)));
         assert_eq!(
             session.apply_level_up(
@@ -348,7 +364,7 @@ mod tests {
     #[rstest]
     fn enemy_leaves_only_once(started: (GameSession, Stage)) {
         let (mut session, stage) = started;
-        let enemy = session.tick(&stage, Duration::ZERO)[0].enemy;
+        let enemy = session.advance(&stage, Tick(0))[0].enemy;
         assert_eq!(session.enemy_fell(enemy), Some(DomainEvent::EnemyDefeated { enemy }));
         assert_eq!(session.enemy_fell(enemy), None);
         assert!(session.enemy_reached_goal(enemy, GoalId(1)).is_empty());
@@ -485,7 +501,7 @@ mod tests {
     fn defeated_counts_each_enemy_once(started: (GameSession, Stage)) {
         let (mut session, stage) = started;
         assert_eq!(session.defeated(), 0);
-        session.tick(&stage, Duration::from_secs(1));
+        session.advance(&stage, Tick(60));
         session.enemy_fell(EnemyId(1));
         session.enemy_fell(EnemyId(1));
         session.enemy_fell(EnemyId(99));
@@ -501,7 +517,7 @@ mod tests {
             prop_oneof![(1u64..4).prop_map(Op::Fell), (1u64..4).prop_map(Op::Goal)], 0..30)
         ) {
             let (mut session, stage) = started(stage(parts()));
-            session.tick(&stage, Duration::from_secs(5));
+            session.advance(&stage, Tick(300));
             let mut left = std::collections::HashMap::<EnemyId, usize>::new();
             for op in ops {
                 let events = match op {
