@@ -10,25 +10,26 @@ use std::{num::NonZeroU32, time::Duration};
 
 use anyhow::Context;
 use application::{
-    PhysicsFact, StartGameCommand, advance_waves, launch_medal, level_up, record_result,
-    resolve_physics, start_game,
+    StartGameCommand, advance_waves, evolve, launch_medal, record_result, resolve_physics,
+    start_game,
 };
-use avian3d::prelude::{Forces, Mass};
+use avian3d::prelude::{Collider, Forces, Friction, Mass, Physics, PhysicsTime, Restitution};
 // Bevy 0.20 の prelude は `ContextExt`（`.context()`）を含み `anyhow::Context`
 // と衝突するため、 anyhow で文脈を付けるこのファイルでは prelude を glob で読み込まない。
 use bevy::prelude::{
     App, Commands, DetectChangesMut, Entity, FixedUpdate, In, IntoScheduleConfigs, IntoSystem,
     Last, MessageReader, MessageWriter, NextState, OnEnter, OnExit, Query, Res, ResMut, Resource,
-    State, SystemSet, Time, Update, Without, debug, error, in_state, info, resource_exists,
+    State, SystemSet, Time, Update, debug, error, in_state, info, resource_exists,
 };
 use domain::{
+    difficulty::Difficulty,
     event::DomainEvent,
-    id::{GameSessionId, PusherCharacterId, StageId},
+    evolution::{Evolution, MedalLevel},
+    id::{GameSessionId, MedalId, PusherCharacterId, StageId},
     launch::CatapultState,
     navigation::Route,
     pusher::PusherCharacter,
     session::{GameSession, GameStatus},
-    spec::MedalType,
     stage::Stage,
     time::Tick,
 };
@@ -42,8 +43,9 @@ use super::{
 };
 use crate::{
     port::{
-        AimModel, Appearance, ControlIntent, DomainEventMsg, GameResult, HudModel, RejectReason,
-        Request, RequestOutcome, RequestStatus, SubmitRequest,
+        AimModel, Appearance, ControlIntent, DomainEventMsg, EvolutionChoice, EvolutionModel,
+        GameResult, HudModel, MedalModel, RejectReason, Request, RequestOutcome, RequestStatus,
+        Silhouette, SubmitRequest,
     },
     state::{AppState, GamePhase},
 };
@@ -131,19 +133,22 @@ pub(super) fn plugin(app: &mut App) {
             accept_start.after(register_requests).run_if(in_state(AppState::CharacterSelect)),
         )
         .add_systems(Update, accept_menu.after(register_requests).run_if(in_state(AppState::Result)))
+        .add_systems(Update, accept_evolution.after(register_requests).run_if(in_state(GamePhase::Evolving)))
+        .add_systems(Update, accept_medal.after(register_requests).run_if(in_state(GamePhase::Running)))
         .add_systems(Last, close_requests)
         // セッションのライフサイクル
         .add_systems(OnEnter(GamePhase::Starting), start_session.pipe(back_to_select_on_error))
         .add_systems(OnEnter(GamePhase::Ending), finish_session)
+        .add_systems(OnEnter(GamePhase::Running), resume_physics)
         .add_systems(OnExit(AppState::InGame), end_session)
         // ゲーム進行
         .add_systems(
             FixedUpdate,
             (
                 (physics::collect_facts, resolve).chain().in_set(Resolve),
-                (accept_level_up, apply_intent).chain().in_set(Command),
-                (spawn_waves, physics::walk_enemies, drive_pushers).in_set(Intent),
-                advance_clock.in_set(Advance),
+                apply_intent.in_set(Command).run_if(can_advance),
+                (spawn_waves, physics::walk_enemies, drive_pushers).in_set(Intent).run_if(can_advance),
+                advance_clock.in_set(Advance).run_if(can_advance),
             ),
         )
         .add_systems(Update, publish_models.run_if(resource_exists::<ActiveGame>));
@@ -189,8 +194,8 @@ fn close_requests(
     let closed = ledger.end_frame(|kind| match kind {
         RequestKind::Start => app_state == AppState::CharacterSelect,
         RequestKind::Menu => app_state == AppState::Result,
-        // Starting 中に届いた強化は Running まで待たせる（期限内）
-        RequestKind::LevelUp => matches!(phase, Some(GamePhase::Starting | GamePhase::Running)),
+        RequestKind::Evolve => phase == Some(GamePhase::Evolving),
+        RequestKind::SelectMedal => phase == Some(GamePhase::Running),
     });
     report(closed, &mut outcomes);
 }
@@ -265,26 +270,33 @@ fn start_session(
         session_id: GameSessionId(counter.0),
         stage_id: selection.stage.clone(),
         character_id: selection.character.clone(),
+        difficulty: Difficulty::EASY,
+        seed: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64
+            ^ counter.0,
     };
-    let out = start_game(&*stages, &*characters, command)
+    let out = start_game(&*stages, &*characters, &specs, command)
         .with_context(|| format!("failed to start game with {selection:?}"))?;
     let medal = out
         .session
-        .medal_spec(MedalType::Normal, &specs)
+        .medal_spec(&MedalId::normal(), &specs)
         .context("normal medal spec is missing")?;
 
-    world::spawn_stage(&mut commands, &out.stage);
+    world::spawn_stage(&mut commands, &out.stage, out.session.difficulty());
     world::spawn_initial_medals(&mut commands, &out.stage, &medal);
     world::spawn_pusher(&mut commands, &out.stage, &out.character.id, &out.pusher);
 
     facts.0.clear();
     commands.insert_resource(KillPlane(out.stage.geometry().floor_y - KILL_DEPTH));
     commands.insert_resource(GameClock::start(TICKS_PER_SECOND));
+    let catapult = CatapultState::new(out.stage.catapult());
     commands.insert_resource(ActiveGame {
         session: out.session,
         stage: out.stage,
         character: out.character,
-        catapult: CatapultState::default(),
+        catapult,
     });
     commands.remove_resource::<GameResult>();
     events.write(DomainEventMsg(out.event));
@@ -313,7 +325,7 @@ fn finish_session(
     mut next: ResMut<NextState<AppState>>,
 ) {
     let session = &game.session;
-    if let GameStatus::Lost { enemy, goal } = session.status() {
+    if session.status() != GameStatus::Playing {
         let record = record_result(&mut progress, session);
         if record.is_ok() {
             save.request(&progress);
@@ -328,14 +340,24 @@ fn finish_session(
             ?play_time,
             "game over"
         );
-        commands.insert_resource(GameResult::Lost {
-            enemy,
-            goal,
-            defeated: session.defeated(),
-            best_defeated,
-            new_record,
-            play_time,
-        });
+        let result = match session.status() {
+            GameStatus::Lost { enemy, goal } => GameResult::Lost {
+                enemy,
+                goal,
+                defeated: session.defeated(),
+                best_defeated,
+                new_record,
+                play_time,
+            },
+            GameStatus::Won => GameResult::Won {
+                defeated: session.defeated(),
+                best_defeated,
+                new_record,
+                play_time,
+            },
+            GameStatus::Playing => return,
+        };
+        commands.insert_resource(result);
     }
     next.set(AppState::Result);
 }
@@ -344,12 +366,15 @@ fn end_session(mut commands: Commands, mut intent: ResMut<ControlIntent>) {
     commands.remove_resource::<ActiveGame>();
     commands.remove_resource::<GameClock>();
     commands.remove_resource::<KillPlane>();
+    commands.insert_resource(MedalModel::default());
+    commands.insert_resource(EvolutionModel::default());
     // 押しっぱなしの意図を次のセッションへ持ち越さない
     *intent = ControlIntent::default();
 }
 
 // ── Resolve ───────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 fn resolve(
     mut game: ResMut<ActiveGame>,
     mut facts: ResMut<PendingFacts>,
@@ -357,50 +382,88 @@ fn resolve(
     mut commands: Commands,
     mut events: MessageWriter<DomainEventMsg>,
     mut phase: ResMut<NextState<GamePhase>>,
+    specs: Res<Specs>,
+    mut physics_time: ResMut<Time<Physics>>,
 ) {
-    let _ = (
-        &mut game,
-        &mut facts,
-        &enemies,
-        &mut commands,
-        &mut events,
-        &mut phase,
-    );
-    let _: fn(&mut GameSession, &mut Vec<PhysicsFact>) -> Vec<DomainEvent> = resolve_physics;
-    todo!()
+    if facts.0.is_empty() {
+        return;
+    }
+    let resolved = resolve_physics(&mut game.session, &mut facts.0, &specs);
+    let defeated: Vec<_> = resolved
+        .iter()
+        .filter_map(|e| match e {
+            DomainEvent::EnemyDefeated { enemy } => Some(*enemy),
+            _ => None,
+        })
+        .collect();
+    physics::despawn_enemies(&defeated, &enemies, &mut commands);
+    if game.session.status() != GameStatus::Playing {
+        physics_time.pause();
+        phase.set(GamePhase::Ending);
+    } else if game.session.gauge().is_full() {
+        physics_time.pause();
+        phase.set(GamePhase::Evolving);
+    }
+    events.write_batch(resolved.into_iter().map(DomainEventMsg));
 }
 
 // ── Command ───────────────────────────────────────────────
 
-/// 【仮】強化の指図を受け付け、結果をECSへ1回だけ反映する（基本設計 4.4）。
+/// 進化の指図を受け付け、物理特性と仮形状を1回だけ更新する。
 #[allow(clippy::too_many_arguments)]
-fn accept_level_up(
+fn accept_evolution(
     mut ledger: ResMut<RequestLedger>,
     mut game: ResMut<ActiveGame>,
     specs: Res<Specs>,
-    mut medals: Query<(&MedalKind, &mut Mass)>,
-    mut pushers: Query<(&mut Pusher, &mut Mass), Without<MedalKind>>,
+    mut medals: Query<(
+        &MedalKind,
+        &mut Mass,
+        &mut Collider,
+        &mut Friction,
+        &mut Restitution,
+        &mut Appearance,
+    )>,
     mut events: MessageWriter<DomainEventMsg>,
     mut outcomes: MessageWriter<RequestOutcome>,
+    mut phase: ResMut<NextState<GamePhase>>,
 ) {
-    for (id, request) in ledger.take_all(RequestKind::LevelUp) {
-        let Request::LevelUp(upgrade) = request else {
-            continue;
+    let (accepted, duplicates) = ledger.take_first(RequestKind::Evolve);
+    report(duplicates, &mut outcomes);
+    if let Some((id, request)) = accepted {
+        let Request::Evolve(evolution) = &request else {
+            return;
         };
-        let ActiveGame { session, character, .. } = &mut *game;
-        let status = match level_up(session, &specs, character, upgrade) {
+        let status = match evolve(&mut game.session, &specs, evolution.clone()) {
             Ok(out) => {
                 if let Some((medal, spec)) = out.medal {
-                    for (_, mut mass) in medals.iter_mut().filter(|(kind, _)| kind.0 == medal) {
+                    for (
+                        _,
+                        mut mass,
+                        mut collider,
+                        mut friction,
+                        mut restitution,
+                        mut appearance,
+                    ) in medals.iter_mut().filter(|(kind, ..)| kind.0 == medal)
+                    {
                         mass.0 = spec.mass.get();
+                        *collider = Collider::cylinder(spec.radius.get(), spec.thickness.get());
+                        *friction = Friction::new(spec.friction);
+                        *restitution = Restitution::new(spec.restitution);
+                        appearance.silhouette = Silhouette::Cylinder {
+                            radius: spec.radius.get(),
+                            height: spec.thickness.get(),
+                        };
                     }
                 }
-                if let Some(stats) = out.pusher {
-                    for (mut pusher, mut mass) in &mut pushers {
-                        pusher.stats = stats;
-                        mass.0 = stats.mass.get();
-                    }
+                if game
+                    .session
+                    .medals()
+                    .level(game.catapult.selected())
+                    .is_none()
+                {
+                    game.catapult.select(MedalId::normal());
                 }
+                phase.set(GamePhase::Running);
                 events.write(DomainEventMsg(out.event));
                 RequestStatus::Completed
             },
@@ -419,9 +482,23 @@ fn apply_intent(
     mut commands: Commands,
     mut events: MessageWriter<DomainEventMsg>,
 ) {
-    let _ = (&mut intent, &mut game, &clock, &specs, &mut commands, &mut events);
-    let _ = launch_medal;
-    todo!()
+    let ActiveGame { session, stage, catapult, .. } = &mut *game;
+    let aim = std::mem::take(&mut intent.aim);
+    if aim != 0.0 {
+        catapult.aim(aim, stage.catapult());
+    }
+    if !(intent.fire || intent.auto_fire) {
+        return;
+    }
+    // 発射条件（クールダウン）が成立していなければ何もしない。却下ではない
+    match launch_medal(session, stage, catapult, &specs, clock.now()) {
+        Ok(Some(out)) => {
+            world::spawn_launched_medal(&mut commands, &out.plan);
+            events.write(DomainEventMsg(out.event));
+        },
+        Ok(None) => {},
+        Err(not_launchable) => debug!(%not_launchable, "fire intent ignored"),
+    }
 }
 
 // ── Intent ────────────────────────────────────────────────
@@ -480,18 +557,101 @@ fn advance_clock(mut clock: ResMut<GameClock>) {
 
 // ── 読み取りモデル ────────────────────────────────────────
 
-fn publish_models(game: Res<ActiveGame>, mut hud: ResMut<HudModel>, mut aim: ResMut<AimModel>) {
+fn publish_models(
+    game: Res<ActiveGame>,
+    specs: Res<Specs>,
+    mut hud: ResMut<HudModel>,
+    mut aim: ResMut<AimModel>,
+    mut evolution: ResMut<EvolutionModel>,
+    mut medals: ResMut<MedalModel>,
+) {
     let session = &game.session;
     hud.set_if_neq(HudModel {
         wave: session.waves().wave() + 1,
         alive_enemies: session.alive_enemy_count(),
-        level: session.level().level(),
+        level: session
+            .medals()
+            .level(game.catapult.selected())
+            .map_or(1, |l| u32::from(l.get())),
+        evolution_percent: (session.gauge().ratio() * 100.0) as u32,
     });
     let c = game.stage.catapult();
     aim.set_if_neq(AimModel {
         origin: c.position(),
         direction: c.direction(game.catapult.yaw()),
     });
+    medals.set_if_neq(MedalModel {
+        owned: session
+            .medals()
+            .owned()
+            .map(|(m, _)| m.clone())
+            .collect(),
+        selected: Some(game.catapult.selected().clone()),
+    });
+    let mut choices = Vec::new();
+    if session.gauge().is_full() {
+        for (medal, level) in session.medals().owned() {
+            if level < MedalLevel::MAX {
+                choices.push(EvolutionChoice {
+                    evolution: Evolution::LevelUp(medal.clone()),
+                    result: medal.clone(),
+                    enabled: true,
+                });
+            }
+        }
+        for (a, b, result) in specs.fusions() {
+            if session.medals().level(a).is_some() && session.medals().level(b).is_some() {
+                choices.push(EvolutionChoice {
+                    evolution: Evolution::Fuse(a.clone(), b.clone()),
+                    result: result.clone(),
+                    enabled: session.medals().level(a) == Some(MedalLevel::MAX)
+                        && session.medals().level(b) == Some(MedalLevel::MAX)
+                        && session.medals().level(result).is_none(),
+                });
+            }
+        }
+        if let Some(medal) = session.evolution_offer() {
+            choices.push(EvolutionChoice {
+                evolution: Evolution::Acquire(medal.clone()),
+                result: medal.clone(),
+                enabled: true,
+            });
+        }
+    }
+    evolution.set_if_neq(EvolutionModel(choices));
+}
+
+fn can_advance(game: Option<Res<ActiveGame>>) -> bool {
+    game.is_some_and(|game| {
+        game.session.status() == GameStatus::Playing && !game.session.gauge().is_full()
+    })
+}
+
+fn resume_physics(mut time: ResMut<Time<Physics>>) {
+    time.unpause();
+}
+
+fn accept_medal(
+    mut ledger: ResMut<RequestLedger>,
+    mut game: ResMut<ActiveGame>,
+    mut outcomes: MessageWriter<RequestOutcome>,
+) {
+    for (id, request) in ledger.take_all(RequestKind::SelectMedal) {
+        let Request::SelectMedal(medal) = &request else {
+            continue;
+        };
+        let status = if game.session.status() != GameStatus::Playing
+            || game.session.gauge().is_full()
+        {
+            RequestStatus::Rejected(RejectReason::WrongState)
+        } else if game.session.medals().level(medal).is_some() {
+            game.catapult.select(medal.clone());
+            RequestStatus::Completed
+        } else {
+            RequestStatus::Rejected(RejectReason::Invalid(format!("medal is not owned: {medal}")))
+        };
+        report([outcome(id, request, status)], &mut outcomes);
+    }
 }
 
 #[cfg(test)]

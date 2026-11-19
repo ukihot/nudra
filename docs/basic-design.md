@@ -145,7 +145,8 @@ Domainはベクトル演算（Rail上の位置、射出速度、進行方向）�
 
 - glamはBevy固有の型ではなく汎用の数学crateであり、Bevyの`Vec3`・`Quat`はglamの再公開である。
 - よってDomainはglamに直接依存し、境界での変換をなくす。
-- glamのバージョンはbevy_mathと一致させる。`cargo tree -i glam`で単一バージョンであることを確認し、Bevy更新時に同時に更新する。
+- domainのglamはbevy_mathと一致させる（現在0.33系）。`cargo tree -i glam@0.33.12`で両者が同じ型を共有することを確認する。
+  Avian内部のobvhsは別途glam 0.34系を使うが、その型をDomainとの境界には渡さない。
 - domainは`domain::math`としてglamを再公開し、applicationはそれを使う。
 - 座標系はBevyに合わせ、右手系・Y軸上向き・単位はメートルとする。
 
@@ -183,7 +184,7 @@ domain/src/
 | GameSessionId | `u64` newtype | 呼び出し側 | ログの相関用 |
 | EnemyId | `u64` newtype | GameSession | 出現時に連番で発行。Bevy Entityとは別物 |
 
-MedalIdは設けない（3.7）。
+メダルの個体IDは設けない。`MedalId` はメダル種の文字列IDであり、個体の識別にはBevy Entityを使う（3.7、3.13）。
 
 ## 3.3 Stage集約
 
@@ -262,7 +263,10 @@ GameSession [Aggregate Root]
 ├── character_id: PusherCharacterId
 ├── status: GameStatus
 ├── waves: WaveProgress               現在のWave、Wave内の経過時間、次の出現エントリ位置
-├── level: LevelProgress              経験値、レベル、適用済みの強化
+├── difficulty: Difficulty            1〜4
+├── medals: MedalCollection           所持メダル種とLv.1〜4
+├── gauge: EvolutionGauge             進化ゲージ
+├── rng / offer                      シード付き乱数と固定したNew!の候補
 ├── alive_enemies: HashSet<EnemyId>   【追加】
 └── next_enemy_id: u64                【追加】
 ```
@@ -277,7 +281,7 @@ GameSession [Aggregate Root]
 stateDiagram-v2
     [*] --> Playing : start
     Playing --> Lost : 敵がGoalに到達
-    Playing --> Won : 勝利条件の成立（未確定）
+    Playing --> Won : 第4Waveの最終ボスを撃破
     Lost --> [*]
     Won --> [*]
 ```
@@ -288,14 +292,14 @@ stateDiagram-v2
 
 | 操作 | 戻り値 | Playing以外のとき |
 |---|---|---|
-| `start(id, &Stage, &PusherCharacter)` | `(GameSession, DomainEvent)`（GameStarted） | — |
-| `tick(&Stage, dt)` | `Vec<SpawnOrder>`（EnemyId発行済み） | 空を返す |
+| `start(id, &Stage, &PusherCharacter, difficulty, &EvolutionRules, seed)` | `(GameSession, DomainEvent)`（GameStarted） | — |
+| `advance(&Stage, now: Tick)` | `Vec<SpawnOrder>`（EnemyId発行済み） | 空を返す |
 | `ensure_playing()` | `Result<(), GameSessionError>` | `Err(NotPlaying)` |
-| `enemy_fell(EnemyId)` | `Option<DomainEvent>`（EnemyDefeated） | `None` |
+| `enemy_fell(EnemyId)` | `Vec<DomainEvent>`（EnemyDefeated、WaveCleared / GameWon） | 空を返す |
 | `enemy_reached_goal(EnemyId, GoalId)` | `Vec<DomainEvent>`（EnemyReachedGoal, GameLost） | 空を返す |
-| `medal_spec(MedalType, &SpecCatalog)` | `MedalSpec`（成長補正済み） | 同左 |
-| `pusher_stats(&PusherCharacter)` | `PusherStats`（成長補正済み） | 同左 |
-| `apply_level_up(Upgrade, &SpecCatalog, &PusherCharacter)`【仮】 | `Result<DomainEvent, GameSessionError>`（LevelUpCompleted） | `Err(NotPlaying)` |
+| `medal_spec(&MedalId, &SpecCatalog)` | `Option<MedalSpec>`（現在レベルの定義） | 同左 |
+| `medals_fell(count, &SpecCatalog)` | `Vec<DomainEvent>`（EvolutionReady） | 空を返す |
+| `evolve(Evolution, &SpecCatalog)` | `Result<DomainEvent, GameSessionError>`（Evolved） | `Err(NotPlaying)` |
 
 区別の原則:
 
@@ -308,7 +312,7 @@ stateDiagram-v2
 
 | # | 条件 | 担保方法 |
 |---|---|---|
-| G1 | 開始時の成長状態は初期状態 | `start`は`LevelProgress::initial()`だけで生成する。成長状態を外から渡す経路を作らない |
+| G1 | 開始時の成長状態は初期状態 | `start`は`MedalCollection::default()`（ノーマルLv.1）と空のゲージだけで生成する |
 | G2 | Goal到達が成立したらLost | `enemy_reached_goal`が同じ呼び出しの中で遷移させる |
 | G3 | 終了後は進行しない | 全操作の先頭でstatusを判定する |
 | G4 | 敵は1回だけ退場する | `alive_enemies`から除去できた場合にだけイベントを出す |
@@ -358,13 +362,13 @@ impl MovementState {
 
 | 型 | 内容 |
 |---|---|
-| MedalType | `Normal` / `Special(SpecialKind)`。SpecialKindは効果の実装を伴うためenumにする（炎・氷・爆発・重量・磁力・反発は候補。初期実装はNormalのみ） |
+| MedalId / MedalTier | メダル種の文字列IDと階層（Normal / Element / Fusion）。個体のIDではない |
 | MedalSpec | 質量、半径、厚み、摩擦、反発係数 |
 | EnemySpec | 質量、サイズ、最大歩行速度、歩行力、摩擦、`ability: Option<EnemyAbility>`（未確定） |
-| SpecCatalog | `MedalType → MedalSpec`、`EnemyTypeId → EnemySpec`。生成時にNormalメダルの定義があることを検証する |
+| SpecCatalog | `MedalId → MedalDef { tier, levels: [MedalSpec; 4] }`、敵定義、錬成レシピ、進化ゲージのルール。ノーマル定義・素材と結果の階層・参照・レシピと結果の重複を検証する |
 | Positive | 正の有限値（`is_finite() && > 0.0`）だけを生成できるnewtype。積は`checked_mul`で検証する |
 
-- 敵の種類（EnemyTypeId）はデータだけで追加できる文字列ID、メダルの種類（MedalType）はコードを伴うためenum、と使い分ける（要件19.2）。
+- 敵もメダルも種類は文字列IDとし、定義データで追加する。効果の部品だけをコードで実装する（3.13）。
 - 物理パラメータは調整の頻度が高いため、コード中の定数にせず定義データ（RON）に置く（5.5）。
 - **不正な物理パラメータはDomainで生成できないようにする。** Avianへ渡す直前の検証には頼らない。
   - `Positive`: メダル・敵の質量／半径／厚み／高さ、Pusherの全能力値（要件6.2より速度0は不正）、強化倍率
@@ -378,7 +382,7 @@ Domainに「全メダルのコレクション」は作らない。
 | 要件上の構成 | 実装上の置き場所 |
 |---|---|
 | Medal.MedalId | **設けない**。メダルに個体識別は不要（強化は種別単位、3.10） |
-| Medal.MedalType | Component `MedalKind(MedalType)` |
+| Medal.MedalType | Component `MedalKind(MedalId)`（種別ID） |
 | Medal.PhysicalProperties | 生成時に`MedalSpec`からAvianの質量・摩擦・反発Componentへ設定 |
 | Medal.Transform | Avianの位置・回転Component |
 | Enemy.EnemyId | Component `Enemy { id }`（Domain IDとBevy Entityの関連付けはここだけ） |
@@ -405,7 +409,7 @@ ECSのWorldがその役割を担い、DomainはGameSessionの`alive_enemies`な�
 | MedalLaunchService | `CatapultState::fire`（launch.rs） | 射出の判断はカタパルトの操作状態に自然に属する |
 | EnemyNavigationService | `navigation::route(&Stage, BridgeId, GoalId) -> Route` と `Route::steer(&mut progress, pos) -> Vec3` | 経路は出現時にStageから一度だけ導出する。【仮決定】経路探索は持たず、Bridge外端→Bridge内端→Goalの経由点を順に目指す |
 | PusherMovementService | `MovementState::advance`（3.5） | Entityの振る舞いで完結する |
-| LevelUpService | `LevelProgress`のメソッド | 成長ルールが未確定。複数集約にまたがる判断が出てきたら分離する |
+| LevelUpService | `GameSession::evolve` と `MedalCollection::evolve` | 進化ルールと全か無かの検証をDomainで完結させる |
 | BattleResolutionService | `GameSession::enemy_fell` / `enemy_reached_goal` | 判定がGameSessionの状態遷移で完結する |
 
 いずれもBevyの型・Query・Commandsを受け取らない。座標は`Vec3`（glam）で受け取る。
@@ -413,18 +417,18 @@ ECSのWorldがその役割を担い、DomainはGameSessionの`alive_enemies`な�
 ### CatapultState
 
 ```rust
-pub struct CatapultState { yaw: f32, selected: MedalType, last_fired: Option<Duration> }
+pub struct CatapultState { yaw: f32, selected: MedalId, next_fire: Tick }
 
 impl CatapultState {
     /// 範囲外は丸める（エラーにしない）
     pub fn aim(&mut self, delta: f32, catapult: &Catapult);
-    pub fn select(&mut self, medal: MedalType);
-    /// 成功時のみlast_firedを更新する
-    pub fn fire(&mut self, catapult: &Catapult, spec: &MedalSpec, now: Duration)
-        -> Result<LaunchPlan, LaunchError>;
+    pub fn select(&mut self, medal: MedalId);
+    /// 発射できたときだけnext_fireを更新する。周期内ならNone
+    pub fn fire(&mut self, catapult: &Catapult, spec: &MedalSpec, now: Tick)
+        -> Option<LaunchPlan>;
 }
 
-pub struct LaunchPlan { pub medal: MedalType, pub spec: MedalSpec, pub origin: Vec3, pub velocity: Vec3 }
+pub struct LaunchPlan { pub medal: MedalId, pub spec: MedalSpec, pub origin: Vec3, pub velocity: Vec3 }
 ```
 
 - 【仮決定】プレイヤーが操作する射出角度は水平の旋回角（yaw）のみとし、仰角はCatapultの定義値で固定する。
@@ -443,22 +447,23 @@ pub struct LaunchPlan { pub medal: MedalType, pub spec: MedalSpec, pub origin: V
 | EnemyDefeated | enemy | ✓（要件のEnemyFellIntoAbyssを統合。撃破の原因が奈落落下だけのため） |
 | EnemyReachedGoal | enemy, goal | ✓ |
 | GameLost | enemy, goal | ✓ |
-| GameWon | — | 勝利条件の確定後 |
-| LevelUpCompleted | 強化の内容 | 成長仕様の確定後 |
+| GameWon | — | 最終ボス撃破 |
+| WaveCleared | wave | 中ボス撃破 |
+| EvolutionReady | — | 進化ゲージ満タン |
+| Evolved | medal, level | レベルアップ・錬成・New!成功 |
 
 - 物理衝突（メダル同士、メダルと敵）はドメインイベントにしない。
-- メダルの落下は、報酬仕様（要件20.1）の確定後に、tick単位の集計値としてのみDomainへ渡す（4.3）。
+- メダルの落下は、tick単位の集計値としてDomainへ渡し、進化ゲージへ加算する（4.3）。
 
-## 3.10 成長（LevelProgress）【骨格のみ】
+## 3.10 成長（LevelProgress）
 
-- 強化の適用単位は**種別単位**とする【仮決定】（要件5.4の未確定事項）。
-  個体単位にすると、メダル個体のIDと状態をDomainが持つ必要が生じ、方針5・15に反するため。
-- `LevelProgress`は**強化後の値**（種別ごとの`MedalSpec`、`PusherStats`）を持つ。
-  強化倍率は`Positive`で、強化後の値はレベルアップ時にchecked演算で確定する。
-  オーバーフローなどで正の有限値にならない強化は`UpgradeError::Overflow`として拒否し、状態を変えない。
-  `medal_spec()` / `pusher_stats()` は検証済みの値を返すだけで、失敗しない。
-- 強化結果のECSへの反映はレベルアップ時の1回だけ行う。毎フレームの同期はしない（4.4）。
-- 経験値の獲得方法・レベルアップ条件・選択方式は未確定（要件9.4）。
+> 成長の仕様は 3.12「メダル進化」で確定した。この節の `LevelProgress` / `Upgrade` は、
+> 3.12 の `MedalCollection` / `Evolution` に置き換え済み。
+
+- 強化の適用単位は**種別単位**（確定）。個体単位にすると、メダル個体のIDと状態をDomainが持つ必要が生じ、方針5・15に反するため。
+- 強化後の値は強化した時点でchecked演算で確定し、正の有限値にならない強化は状態を変えずに拒否する（全か無か）。
+  この原則は 3.12 のレベルアップ・錬成でも維持する。
+- 強化結果のECSへの反映は強化時の1回だけ行う。毎フレームの同期はしない（4.4）。
 
 ## 3.11 Repository
 
@@ -499,6 +504,195 @@ pub trait ProgressRepository {
   ステージ回数の合計 > 総プレイ回数 を拒否）。
 - 実装と保存形式は5.7。
 
+## 3.12 中核のゲームサイクル（確定仕様）
+
+```mermaid
+flowchart LR
+    A[メダル射出<br/>長押し・オート] --> B[メダルが奈落へ落下]
+    B --> C[進化ゲージ蓄積<br/>難易度で倍率]
+    C -->|満タン| D[進化画面<br/>時計停止]
+    D --> E[レベルアップ<br/>または錬成]
+    E --> A
+    A --> F[敵を奈落へ]
+    F -->|中ボス撃破| G[次のWave]
+    G -->|第4Wave 最終ボス撃破| H[勝利]
+```
+
+### メダル射出（連射・オート）
+
+- 射出は**継続的な操作意図**（6.4）。`firing = fire_button_held || auto_fire` で決まる。
+  - 手動: 押している間、連続で射出する（ダダダダ）
+  - オートON: 押していなくても連続で射出し続ける（メダルが流れ続ける）
+- 射出の間隔は、待ち時間を意識させるクールダウンではなく、**連射速度を決める発射周期**（`fire_interval: Ticks`）。
+  例: 60Hzで6Tickごとなら秒間10枚。値は調整ノブ。
+- **射出の制約はStage、現在の状態はゲーム中の状態**に分ける（静的な定義と動的な状態を混ぜない）。
+
+  | 置き場所 | 持つもの |
+  |---|---|
+  | Stage（定義） | カタパルトの位置、初期の旋回角、旋回できる範囲、仰角、射出速度、発射周期 |
+  | `CatapultState`（ゲーム中） | 現在の旋回角、選択中のメダル、次に発射できるTick（`next_fire`） |
+
+  発射周期はステージごとに定義し、将来は進化で変えられるようにする（そのときも期限Tickの比較だけで済む）。
+
+### Wave（全4Wave、確定）
+
+| Wave | 出現内容 | 次へ進む条件 |
+|---|---|---|
+| 1〜3 | 通常敵 + 終盤に中ボス1体 | その中ボスを撃破 |
+| 4 | 最終ボスのみ | 最終ボス撃破で**勝利**（`GameStatus::Won`） |
+
+- ボスは **Waveの構造で指定する**（各Waveは「通常の出現の列」と「ボスの出現1件」を持つ）。どの敵種をボスにするかは定義データ次第。
+  これによりStage単体で構成を検証でき、セッションは定義データを見ずに「この敵がWaveのボスか」を判断できる。
+- Stage の不変条件に追加: Waveはちょうど4つ。第4Waveは通常の出現を持たない（最終ボスのみ）。
+- 中ボス撃破で `WaveCleared`、次に進めたTickから次のWaveが始まる。最終ボス撃破で `GameWon`。
+- 【未決】中ボス撃破の時点で残っている通常敵の扱い（そのまま残す／一掃する）。当面は「そのまま残す」で実装する。
+- 【未決】「終盤」の定義（Wave内の出現時刻の最後とするか、条件で出すか）。当面は WavePlan の出現時刻で表す。
+
+### メダル進化（レベルアップ・錬成）
+
+- メダルを奈落へ落とすと**進化ゲージ**が溜まる。溜まりやすさは難易度に依存する。
+  - 落下の検知は物理（Infrastructure）が行い、**落下の成立（tickごとの枚数の集計）をDomainへ渡す**。
+    ゲージの増加量（枚数 × 難易度の倍率）はDomainが決める（旧方針「メダル落下はDomainへ渡さない」を変更）。
+- ゲージが満タンになると、インゲーム中に**進化画面**を出す。進化画面の間は**ゲーム世界の時計を止める**
+  （`GamePhase::Evolving`。`GameClock` は進まず、敵も物理も止まる）【仮決定】。選択を確定すると `Running` に戻る。
+- 進化の選択肢はレベルアップ・錬成・New!。選択は**指図**（`Request::Evolve`）として台帳を通し、必ず完了／却下で終わる。
+
+  | 選択 | 条件 | 結果 |
+  |---|---|---|
+  | レベルアップ | 対象のメダル種がLv.4未満 | そのメダル種が Lv+1（最大Lv.4） |
+  | 錬成 | メダルA・Bがどちらも**Lv.4**で、A+Bの錬成レシピが存在する | 別のメダルCを**Lv.1**で得る |
+
+- 錬成の項目は、条件を満たすときだけグレーアウトを解除する。UIの表示とは別に、**Domainでも条件を検証する**。
+- メダル種ごとのレベル（1〜4）は、セッション中の `MedalCollection`（所持メダル種とレベル）で持つ。
+  開始時は Normal Lv.1。レベルごとの物理特性（質量など）は定義データに持たせ、checked演算の原則（3.10）を守る。
+- 錬成レシピは定義データ（`(A, B) → C`）で持つ。順序は問わない（A+B と B+A は同じ）。
+- 錬成では素材A・Bを**消費する**（確定）。A・Bは所持から外れ、Cが Lv.1 で加わる。
+- 【仮決定】錬成の結果Cをすでに所持している場合は錬成できない（`ResultAlreadyOwned`）。
+- Normal 以外のメダルは、進化画面の **New!**（未所持の素材をランダムに1つ、Lv.1）で手に入る（確定、3.13）。
+- Pusherは成長しない（確定）。進化の対象はメダルだけ。
+- インゲームの成長は持ち越さない（要件9.1）。
+
+### 難易度（全4段階）
+
+| 影響するもの | 難易度による違い |
+|---|---|
+| 進化ゲージ | 溜まりやすさ（倍率） |
+| Goalの数 | Easy は1つ。難しくなるほど増える |
+| Wave構成 | 4Wave は共通 |
+| 進化のルール | Lv.4上限・錬成条件は共通 |
+
+- `Difficulty` を値オブジェクトとし、難易度ごとの設定値（ゲージ倍率など）は定義データに持つ。
+- Goal は Stage の定義で「どの難易度から有効か」を持ち、選んだ難易度で有効なGoalだけを使う。
+  敵が目指すのも有効なGoalだけ。
+- 難易度はアウトゲームで選び、開始の指図（`Request::Start`）に含める。
+- 【未決】Easy 以外の3段階の名称と、各段階の具体的な数値。
+
+### Abyss（奈落）
+
+- Abyss は**橋より下にある奈落**。落下した敵は撃破、メダルは除去してゲージに数える。
+- 【未決】判定の形（落下判定面か領域か）。単純なY座標だけの判定は、橋の下に足場があると誤判定するため、
+  ステージのアセットが決まった時点で決める。当面の実装はAABBの集合のまま。
+
+## 3.13 メダル図鑑と効果
+
+### 全89種（確定）
+
+| 階層 | 種類 | 数 | 入手 |
+|---|---|---|---|
+| ノーマル | ノーマルメダル | 1 | 開始時に所持（Lv.1） |
+| 素材 | 炎・砂・水・光・浄化・血・毒・雷・風・幻・死・星・時・刃・太陽・山 | 16 | 進化画面の **New!**（未所持の素材から1つランダム、Lv.1） |
+| 錬成 | 焼きいも・サウナ・花火 … 72種（下の錬成表） | 72 | 素材2種（どちらもLv.4、消費）の錬成で Lv.1 |
+
+- 錬成表は素材16種どうしの対称表（A+B と B+A は同じ）。72通りのレシピがあり、結果はすべて別のメダル。
+  同じ素材どうし（×）とレシピの無い組み合わせ（—）は錬成できない。ノーマル・錬成メダルは素材にならない。
+- メダルは**定義データで識別する**（`MedalId`、例 `"fire"` `"roasted_sweet_potato"`）。89種をコードの列挙で持たない。
+  名前・階層・レベルごとの物理特性・効果は定義データに書き、表示名はロケールのカタログ（`ui.json` とは別の `medals.json`）に置く。
+- 錬成表そのものも定義データ（`fusions`）。読込時に、対称性・自己錬成なし・結果の重複なし・参照するメダルの存在を検証する。
+
+### 進化画面の選択肢
+
+| 選択肢 | 出る条件 |
+|---|---|
+| レベルアップ（所持メダルごと） | そのメダルが Lv.4 未満 |
+| 錬成（組み合わせごと） | 素材2種がどちらも Lv.4 で、レシピがある（それ以外はグレーアウト） |
+| **New!** 未所持メダル Lv.1 | 未所持の素材が残っている。候補は1つ【仮決定】 |
+
+- New! の候補は、ゲージが満タンになった時点で決めて進化の提示（`EvolutionOffer`）として固定する。画面を開き直しても変わらない。
+- 乱数はセッション開始時のシードから生成する決定的な乱数（Domain内の小さなPRNG）。同じシードなら同じ候補になり、テストで再現できる。
+- New! の選択も指図（`Request::Evolve(Evolution::Acquire(id))`）。提示された候補以外は却下する。
+
+### 効果の設計方針
+
+#### メダル名の雰囲気（確定）
+
+ダークファンタジー調に寄せず、少し気の抜けた、コミカルでカジュアルな名前にする。
+素材の組み合わせを厳密な物質変化として解釈する必要はない。今回確定した名前は次の通り。
+
+| 素材A | 素材B | 錬成メダル | ID |
+|---|---|---|---|
+| 炎 | 水 | サウナ | `sauna` |
+| 炎 | 毒 | 激辛 | `spicy_food` |
+| 星 | 浄化 | 願い | `wish` |
+| 刃 | 雷 | チェーンソー | `chainsaw` |
+
+錬成表の正本は [medal-fusions.csv](medal-fusions.csv)。ユーザーから提示された16×16の対称表をそのまま収録する。
+現在の同梱データはノーマル1種・素材16種・錬成72種（全89種）。全256組について、錬成可否・結果・対称性を正本と照合する。
+特殊効果は未実装。レベル別の物理特性・進化ゲージの数値は検証用の仮値。
+
+#### 物理による効果
+
+敵にHPは無い（要件2.4）。効果はすべて**物理で表す**: 押す・引く・浮かせる・滑らせる・止める・重さを変える。
+効果は少数の**効果の部品**（コードで実装）の組み合わせとして定義データに書く。新しいメダルはデータの追加で作れる。
+
+| 効果の部品 | 物理での表し方 |
+|---|---|
+| 爆風 `Blast` | 着弾点から放射状のインパルス |
+| 突風 `Gust` | 一方向（射出方向）への広い押し出し |
+| 引力 `Pull` | 一点（または奈落方向）へ引き寄せる力 |
+| 浮上 `Lift` | 上向きのインパルス（メダルの山を崩す） |
+| 床効果 `Floor` | 一定時間、その範囲の摩擦を上げる／下げる |
+| 足止め `Stall` | 敵の歩行力を一定時間0にする（気絶・幻惑） |
+| 減速 `Slow` | 敵の最大速度を一定時間下げる |
+| 重さ `Weight` | メダル自体の質量・大きさを変える（重い・巨大） |
+| 弱体 `Weaken` | 敵の質量を一定時間下げる（押し流されやすくなる） |
+| 迷走 `Confuse` | 敵の進行方向を一定時間ずらす（奈落側へ歩く） |
+
+#### 素材16種の効果（案）
+
+| 素材 | 効果 | 部品 |
+|---|---|---|
+| 炎 | 着弾で熱風。周りのメダルと敵を外へ弾く | 爆風 |
+| 砂 | 砂だまり。範囲の床が重くなり敵が歩きにくい | 床効果（摩擦↑）＋減速 |
+| 水 | 水たまり。床が滑り、敵もメダルも流されやすい | 床効果（摩擦↓） |
+| 光 | まぶしさで近くの敵が立ち止まる | 足止め |
+| 浄化 | 中ボスの能力を一定時間打ち消す | （能力解除。能力の仕様確定後） |
+| 血 | 当たった敵に印。その敵は軽くなり押されやすい | 弱体 |
+| 毒 | じわじわ効く毒。範囲の敵が遅く・軽くなる | 減速＋弱体 |
+| 雷 | 当たった敵から近くの敵へ連鎖して一瞬しびれる | 足止め（連鎖） |
+| 風 | 射出方向へ突風。メダルの山ごと押し流す | 突風 |
+| 幻 | 幻を見せて敵を迷わせ、奈落側へ歩かせる | 迷走 |
+| 死 | 奈落の縁にいる敵を奈落へ引きずり込む | 引力（奈落方向） |
+| 星 | 小さな重力異常。周りのメダルを浮かせて崩す | 浮上 |
+| 時 | 範囲の敵の時間を遅らせる | 減速（強） |
+| 刃 | 鋭く速い薄いメダル。敵を貫いて後ろの敵も押す | 重さ（薄く速い）＋貫通 |
+| 太陽 | 巨大なメダル。ゆっくり転がり何でも押しのける | 重さ（大きさ↑） |
+| 山 | 最も重いメダル。押されず、敵の通り道をふさぐ | 重さ（質量↑） |
+
+#### 錬成メダルの効果
+
+- 錬成メダルは**両方の素材の効果を受け継ぎ**、名前に合わせた**ひとひねり**を加える。例:
+
+  | 錬成メダル | 素材 | 効果（案） |
+  |---|---|---|
+  | 焼きいも | 炎＋砂 | 熱い砂だまり。踏んだ敵が熱さで跳ね退き（爆風）、足も取られる（摩擦↑） |
+  | サウナ | 炎＋水 | 蒸気で範囲の敵がのぼせて止まる（足止め＋床が滑る） |
+  | 花火 | 炎＋光 | 時間差で連続して弾ける（爆風×複数回）＋まぶしさで足止め |
+  | 台風 | 水＋風 | 広範囲の渦。周りを巻き込みながら一方向へ押し流す（突風＋床が滑る） |
+  | ブラックホール | 死＋星 | 一点に強い引力。周りの敵とメダルを吸い寄せてから奈落へ |
+  | 化石 | 時＋山 | 動かない重い化石になり、敵の通り道を長く塞ぐ（重さ↑↑＋減速） |
+
+- 【未決】72種すべての効果の詳細と数値。部品の組み合わせとして定義データに書き、調整する。
+
 ---
 
 # 4. アプリケーション層設計（crates/application）
@@ -516,11 +710,11 @@ pub trait ProgressRepository {
 
 | ユースケース | 入力 | 出力 | Error | 呼び出し元 |
 |---|---|---|---|---|
-| `start_game` | `&impl StageRepository`, `&impl PusherCharacterRepository`, `StartGameCommand { session_id, stage_id, character_id }` | `StartGameOutput { session, stage, character, pusher: PusherSetup, event }` | `StartGameError` | OnEnter(InGame) |
+| `start_game` | Repository、SpecCatalog、`StartGameCommand { session_id, stage_id, character_id, difficulty, seed }` | `StartGameOutput { session, stage, character, pusher: PusherSetup, event }` | `StartGameError` | OnEnter(Starting) |
 | `launch_medal` | `&GameSession`, `&Stage`, `&mut CatapultState`, `&SpecCatalog`, now | `LaunchOutput { plan, event }` | `LaunchMedalError` | FixedUpdate / Command |
 | `advance_waves` | `&mut GameSession`, `&Stage`, dt | `Vec<SpawnOrder>`、EnemySpawnedイベント | なし | FixedUpdate / Intent |
-| `resolve_physics` | `&mut GameSession`, `&mut Vec<PhysicsFact>` | `Vec<DomainEvent>` | なし | FixedUpdate / Resolve |
-| `level_up`【仮】 | `&mut GameSession`, `&SpecCatalog`, `&PusherCharacter`, `Upgrade` | `LevelUpOutput`（変更後のSpec） | `GameSessionError` | 未確定 |
+| `resolve_physics` | `&mut GameSession`, `&mut Vec<PhysicsFact>`, `&SpecCatalog` | `Vec<DomainEvent>` | なし | FixedUpdate / Resolve |
+| `evolve` | `&mut GameSession`, `&SpecCatalog`, `Evolution` | `EvolveOutput`（イベント・変更後のSpec） | `GameSessionError` | Update / Evolving（時計停止中） |
 
 ## 4.3 PhysicsFact（物理の結果からゲーム上の意味への変換点）
 
@@ -528,6 +722,7 @@ pub trait ProgressRepository {
 pub enum PhysicsFact {
     EnemyEnteredAbyss(EnemyId),
     EnemyEnteredGoal(EnemyId, GoalId),
+    MedalsFell(u32),
 }
 ```
 
@@ -537,8 +732,7 @@ pub enum PhysicsFact {
   1. 落下を先、到達を後に並べ替える（3.4）
   2. GameSessionへ順に適用する
   3. 発生したDomainEventを返す
-- メダルの落下はPhysicsFactに含めない（報酬が未確定のため）。
-  必要になったら、tick単位の集計`MedalsFell { count_by_type }`を1件だけ追加する。
+- メダルの落下はセンサー・安全高度の重複をEntity単位で除き、tick単位の枚数 `MedalsFell(count)` を1件だけ渡す。
 - ジャックポット（要件8章）専用のロジックは持たない。通常の物理から自然に発生させる（要件8.3）。
   検知や報酬が必要になった時点で、上記の集計値から判定する。
 
@@ -567,11 +761,16 @@ pub enum PhysicsFact {
 - 物理: Avian
 - 物理の後: `resolve_physics`（撃破・敗北の判定）
 
-### level_up（要件16.4）【仮】
+### evolve（要件16.4、確定仕様3.12）
 
-1. `session.apply_level_up(choice)?`
-2. 変更後のSpec（例: Normalメダルの質量）を返す
-3. game側で、該当種別の既存メダルのAvianの質量Componentを1回だけ更新する
+1. `session.evolve(choice, specs)?`。ゲージ・所持・レベル・錬成・New!の候補を検証する
+2. 変更後のSpecとイベントを返す
+3. game側で、該当種別の既存メダルの質量・Collider・摩擦・反発・仮形状を1回だけ更新する
+4. 錬成で選択中の素材が消費されたら、射出メダルをノーマルへ戻す。盤面上の素材個体は残す
+5. 成功したときだけRunningへ戻す。却下時は時計停止とNew!の候補を保つ
+
+全メダルがLv.4で、未所持の素材も実行可能な錬成も無い場合、ゲージを蓄積しない。
+選択肢の無い進化画面でゲームが止まることを防ぐ。
 
 ## 4.5 アプリケーションのError
 
@@ -657,7 +856,7 @@ stateDiagram-v2
 | 3. 初期メダルを配置する | OnEnter(InGame)、`InitialMedalPlacement::positions()`から一括生成 |
 | 4. Pusherを配置する | OnEnter(InGame)、`PusherSetup`から生成 |
 | 5. 敵の出現進行を初期化する | `GameSession::start`（WaveProgressの初期化） |
-| 6. 成長状態を初期化する | `GameSession::start`（`LevelProgress::initial`） |
+| 6. 成長状態を初期化する | `GameSession::start`（ノーマルLv.1・空の進化ゲージ） |
 | 7. ゲームを開始する | 状態がInGameになり、FixedUpdateのGameplaySetが動き始める |
 
 ## 5.3 ECS構成
@@ -670,7 +869,7 @@ stateDiagram-v2
 | Abyss | `AbyssZone` | Static + Sensor | 少 |
 | Goal | `GoalZone(GoalId)` | Static + Sensor | 少 |
 | Catapult | `CatapultModel` | なし（表示のみ） | 1 |
-| Medal | `MedalKind(MedalType)` | Dynamic + Collider（円柱） | 数百〜数千 |
+| Medal | `MedalKind(MedalId)` | Dynamic + Collider（円柱） | 数百〜数千 |
 | Enemy | `Enemy { id }`, `EnemyKind`, `Navigation`, `Walker` | Dynamic + Collider、回転ロック | 数十〜数百 |
 | Pusher | `Pusher { stats }`, `PusherMotion` | Dynamic + Collider、回転ロック | 1（複数可否は未確定） |
 
@@ -761,7 +960,7 @@ InfrastructureとPresentationは`port`だけに依存し、互いを参照しな
 
 | 方向 | 種類 | 型 |
 |---|---|---|
-| Presentation → Infrastructure | Message（入力ポート） | `StartRequested` / `AimRequested` / `LaunchRequested` / `LevelUpRequested` / `MenuRequested` |
+| Presentation → Infrastructure | 継続意図と指図（入力ポート） | `ControlIntent`（旋回・手動／オート発射）、`SubmitRequest`（Start / Evolve / SelectMedal / Menu） |
 | Infrastructure → Presentation | Message（出力ポート） | `DomainEventMsg(DomainEvent)` |
 | Infrastructure → Presentation | 読み取り専用Resource | `CharacterRoster` / `HudModel` / `AimModel` / `GameResult` |
 | Infrastructure → Presentation | Component | `Appearance { key, silhouette }`（何に見えるべきか） |
@@ -826,15 +1025,16 @@ Nudraのゲームプレイは、インターネット接続・ユーザー認証
 ```
 PreUpdate          Bevyの入力収集
 StateTransition    OnEnter / OnExit
-FixedMain × N      固定ステップ（既定64Hz。調整ノブ）
+FixedMain × N      固定ステップ（60Hz。調整ノブ）
   FixedUpdate
     GameplaySet::Resolve    前ステップの物理結果 → resolve_physics → 撃破した敵の除去・敗北遷移
-    GameplaySet::Command    LaunchRequested → launch_medal → メダル生成
+    GameplaySet::Command    ControlIntent → launch_medal → メダル生成
     GameplaySet::Intent     advance_waves → 敵の生成 / 敵の歩行力 / Pusherの制御力
+    GameplaySet::Advance    GameClockを1Tick進める
   FixedPostUpdate
     Avianの物理ステップ
 Update
-    PresentationSet::Input     入力 → CatapultControlの更新 / LaunchRequestedの送信
+    PresentationSet::Input     入力 → ControlIntentの更新 / SubmitRequestの送信
     PresentationSet::Feedback  DomainEventMsg → HUD・演出・音
     カメラ
 PostUpdate以降     Transformの伝播・描画
@@ -842,8 +1042,8 @@ PostUpdate以降     Transformの伝播・描画
 
 ## 6.2 順序の決め方
 
-- `GameplaySet`は`(Resolve, Command, Intent).chain()`で**明示的に直列化**する。
-  すべて`run_if(in_state(AppState::InGame))`を付ける。
+- `GameplaySet`は`(Resolve, Command, Intent, Advance).chain()`で**明示的に直列化**し、`Running`の間だけ動かす。
+  Resolveで終了またはゲージ満タンが確定したTickは、後続のCommand・Intent・Advanceも止める。
 - Resolveを先頭に置く理由:
   1. 敗北が確定したtickで、同じtickの射出や敵の出現を行わせないため
      （GameSessionの不変条件G3でも防いでおり、二重の安全策になる）
@@ -896,7 +1096,7 @@ PostUpdate以降     Transformの伝播・描画
 3. **実行可否は受付で決める。** 状態・セッションの有無・Domain の検証は受付で行い、実行段階に失敗し得る処理を残さない。
 4. **フレームをまたぐ状態は1つの Resource にまとめる。** セッションに必要な値（セッション・ステージ・キャラクター・カタパルト）は
    `ActiveGame` 1つで挿入・除去し、「一部だけ存在する」時間帯を作らない。
-5. **フェーズで実行範囲を区切る。** InGame をサブ状態 `GamePhase::{Starting, Running, Ending}` に分け、
+5. **フェーズで実行範囲を区切る。** InGame をサブ状態 `GamePhase::{Starting, Running, Evolving, Ending}` に分け、
    ゲーム進行の System は `Running` の間だけ動かす。`Running` なら `ActiveGame` が必ず存在する。
 6. **網羅性をテストで保証する。** 「全要求が終端に至る」「台帳が空に戻る」に加え、
    ランダムな入力列で長時間プレイさせるソークテストで、パニック0・エラーハンドラ到達0を確認する
@@ -917,8 +1117,9 @@ stateDiagram-v2
 
 | 要求 | 受け付ける状態 | 主な却下理由 |
 |---|---|---|
-| `Start(character)` | CharacterSelect | 未知のキャラクター、ステージ無し |
-| `LevelUp(upgrade)` | InGame / Running | 終了後、強化後の値が不正 |
+| `Start { character, difficulty }` | CharacterSelect | 未知のキャラクター、ステージ無し |
+| `Evolve(choice)`（レベルアップ・錬成） | InGame / Evolving | Lv.4のメダルのレベルアップ、錬成条件（両方Lv.4・レシピあり）を満たさない |
+| `SelectMedal(id)` | InGame / Running | 未所持のメダル、終了・進化への遷移中 |
 | `Menu` | Result | — |
 
 - 期限（TTL）は調整ノブ（既定 1秒）。状態遷移の途中で届いた要求も、期限切れとして必ず終端に至る。
@@ -930,12 +1131,15 @@ stateDiagram-v2
 stateDiagram-v2
     [*] --> Starting : OnEnter(InGame)
     Starting --> Running : ActiveGame と盤面の生成が完了
+    Running --> Evolving : 進化ゲージが満タン（時計停止）
+    Evolving --> Running : 進化の指図が完了
     Running --> Ending : GameLost / GameWon
     Ending --> [*] : 記録・保存の完了 → Result へ
 ```
 
 - `Starting`: `start_game` を実行し、`ActiveGame` と盤面を生成する。失敗したら CharacterSelect へ戻す（終端あり）。
 - `Running`: ゲーム進行（Resolve → Command → Intent）が動く唯一のフェーズ。
+- `Evolving`: Updateで進化の指図だけを処理する。Resolveでゲージ満タンを検出した時点から射出・歩行・出現・時計を止め、`Time<Physics>::pause()`で物理も止める。次の状態遷移を待たない。
 - `Ending`: 結果の記録と保存を行ってから Result へ遷移する。進行の System は止まっている。
 
 ### 非同期ジョブと並列処理
@@ -969,12 +1173,12 @@ stateDiagram-v2
 - `GameClock` は `GamePhase::Running` の固定ステップごとに1つ進む。一時停止中・`Starting` / `Ending` 中は進まない。
   端末の時計やフレームレートに依存しない。
 - Entity・Domainの状態は「残り時間」を毎tick減算せず、**期限のTick**を持って現在のTickと比較する（u64の比較なので誤差が無い）。
-  - カタパルト: `next_fire: Tick`。発射の意図があり `now >= next_fire` なら発射し、`next_fire = now + cooldown`。
+  - カタパルト: `next_fire: Tick`。射出中（押下またはオート）で `now >= next_fire` なら発射し、`next_fire = now + fire_interval`（発射周期）。
   - Wave: 開始Tickを持ち、`開始Tick + 出現オフセット ≦ now` で出現させる。
 - Domainの時間はすべて `Tick` / `Ticks`。定義データのミリ秒は読込時に `Ticks::from_millis_ceil(ms, 60)` で切り上げ変換する
   （クールダウンが短くならないように）。
 - 連続的な運動（Pusherの移動など）は、1tickの長さ（秒）を掛けて進める。
-- 発射ボタンは意図（`ControlIntent.fire`）。クールダウン中に発射しないことは却下ではなく、条件の未成立。
+- 射出は意図（`ControlIntent { fire, auto }`）。`fire || auto` の間は発射周期ごとに発射する。周期の途中で発射しないことは却下ではない。
   発射した事実だけを `MedalLaunched` で通知する。
 
 ---
@@ -1315,25 +1519,34 @@ game:
 
 | # | 項目 | 本書での扱い | 確定に必要なもの |
 |---|---|---|---|
-| 1 | Waveの定義場所 | StageにWavePlanとして持つ | Waveの仕様（要件20.1） |
-| 2 | 敵のGoal選択 | WavePlanの出現エントリで指定する | 敵の仕様（要件20.3） |
+| 1 | Wave（確定） | 全4Wave。第1〜3Waveは通常敵+終盤の中ボス、第4Waveは最終ボスのみ（3.12） | — |
+| 2 | 敵のGoal選択 | WavePlanの出現エントリで指定する（難易度で無効なGoalは使わない） | 敵の仕様（要件20.3） |
 | 3 | 敵の経路 | Bridge外端→内端→Goalの経由点を直線で結ぶ | ステージ形状の確定 |
-| 4 | 射出角度 | 水平の旋回のみ。仰角は固定 | 操作感の検証 |
-| 5 | 射出のクールダウン | Catapultに追加 | 負荷の検証 |
-| 6 | 強化の適用単位 | 種別単位 | 成長仕様（要件9.4） |
-| 7 | 勝利条件 | `GameStatus::Won`だけ用意し、判定は未実装 | 要件3.4、20.1 |
+| 4 | 射出角度（確定） | 旋回の初期値・範囲はStageで定義、現在の角度はゲーム中の状態（3.12） | 仰角を操作するかは操作感の検証 |
+| 5 | 射出の間隔（確定） | 長押し連射・オート連射。発射周期（`fire_interval`）で間隔を決める（3.12） | 周期の数値は調整 |
+| 6 | 強化（確定） | メダル種ごとのLv.1〜4、レベルアップと錬成（両方Lv.4で別メダルLv.1）。進化ゲージで発動（3.12） | — |
+| 7 | 勝利条件（確定） | 第4Waveの最終ボス撃破で `GameStatus::Won` | — |
 | 8 | 同じtickの落下と到達 | 落下を優先 | ゲームバランス |
 | 9 | Railの形状 | 折れ線 | 曲線Railに必要な精度 |
 | 10 | 初期メダルの配置 | 格子配置 | 配置アルゴリズム（要件4.8） |
-| 11 | Abyssの領域 | AABBの集合 | ステージ形状 |
+| 11 | Abyss | 橋より下の奈落（確定）。判定の形は当面AABBの集合 | ステージのアセット |
 | 12 | ステージ選択 | 既定ステージに固定 | アウトゲーム仕様（要件3.1） |
 | 13 | Pusherの数 | 1体 | 要件20.2 |
 | 14 | Pusher・敵の剛体制御 | 力制限付きDynamic | 9.4の検証 |
 | 15 | 地形の衝突形状 | glTFメッシュ由来か単純形状か | 9.4の検証 |
 | 16 | GameSessionRepository | 作らない（インゲームの途中保存は無し） | 保存・再開の要件 |
-| 17 | メダル落下の報酬 | Domainへ渡さない | 要件20.1 |
+| 17 | メダル落下（確定） | 落下の成立をtickごとに集計してDomainへ渡し、進化ゲージに加算（旧方針を変更） | — |
 | 18 | セーブの対象 | 最後のキャラクター・総プレイ回数・ステージごとの記録 | アウトゲームの仕様 |
 | 19 | 2.5Dの外観 | 固定カメラの見下ろし＋Billboard差し替え | アート方針 |
+| 20 | 進化画面中の時計 | 止める（`GamePhase::Evolving`） | 操作感の検証 |
+| 21 | 錬成の素材（確定） | 素材A・Bは消費する | — |
+| 22 | 中ボス撃破時に残っている通常敵 | 残す | ゲームデザイン |
+| 23 | Waveの「終盤」の定義 | WavePlanの出現時刻で表す | ゲームデザイン |
+| 24 | 難易度 | 全4段階（確定）。Easy以外の名称・数値は未決 | ゲームデザイン |
+| 25 | Pusherの成長（確定） | 成長しない。進化はメダルのみ（旧 `Upgrade::Pusher*` は廃止） | — |
+| 26 | メダル図鑑（確定） | ノーマル1・素材16・錬成72の全89種。錬成表は確定（3.13） | — |
+| 27 | New! の候補 | 未所持の素材から1つ（セッションのシードによる決定的な乱数） | ゲームデザイン |
+| 28 | メダルの効果 | 効果の部品の組み合わせ。素材16種は案あり、錬成72種は詳細未決 | ゲームデザイン |
 
 ---
 

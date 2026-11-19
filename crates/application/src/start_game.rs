@@ -1,12 +1,14 @@
 //! インゲーム開始（要件16.1、基本設計 4.4）。
 
 use domain::{
+    difficulty::Difficulty,
     event::DomainEvent,
     id::{GameSessionId, PusherCharacterId, RailId, StageId},
     math::Vec3,
     pusher::{MovementState, PusherCharacter, PusherStats},
     repository::{PusherCharacterRepository, StageRepository},
     session::GameSession,
+    spec::SpecCatalog,
     stage::Stage,
 };
 
@@ -15,6 +17,8 @@ pub struct StartGameCommand {
     pub session_id: GameSessionId,
     pub stage_id: StageId,
     pub character_id: PusherCharacterId,
+    pub difficulty: Difficulty,
+    pub seed: u64,
 }
 
 /// Pusherの初期配置。
@@ -46,6 +50,7 @@ pub enum StartGameError {
 pub fn start_game(
     stages: &impl StageRepository,
     characters: &impl PusherCharacterRepository,
+    specs: &SpecCatalog,
     command: StartGameCommand,
 ) -> Result<StartGameOutput, StartGameError> {
     let stage = stages
@@ -54,7 +59,14 @@ pub fn start_game(
     let character = characters
         .find(&command.character_id)
         .ok_or(StartGameError::CharacterNotFound(command.character_id))?;
-    let (session, event) = GameSession::start(command.session_id, &stage, &character);
+    let (session, event) = GameSession::start(
+        command.session_id,
+        &stage,
+        &character,
+        command.difficulty,
+        specs.evolution(),
+        command.seed,
+    );
 
     let rail = stage
         .rails()
@@ -65,7 +77,8 @@ pub fn start_game(
         rail: rail.id(),
         motion,
         position: motion.target(rail),
-        stats: session.pusher_stats(&character),
+        // Pusherは成長しない（基本設計 3.12）
+        stats: character.base_stats,
     };
     tracing::info!(session_id = %session.id(), stage_id = %stage.id(), character_id = %character.id, "game started");
     Ok(StartGameOutput { session, stage, character, pusher, event })
@@ -78,13 +91,15 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
-    use crate::test_support::{MockCharacters, MockStages, character, stage};
+    use crate::test_support::{MockCharacters, MockStages, character, specs, stage};
 
     fn command() -> StartGameCommand {
         StartGameCommand {
             session_id: GameSessionId(42),
             stage_id: StageId::new("stage_01"),
             character_id: PusherCharacterId::new("mop_rabbit"),
+            difficulty: Difficulty::HARDEST,
+            seed: 42,
         }
     }
 
@@ -111,12 +126,18 @@ mod tests {
         let out = start_game(
             &stages_returning(Some(stage)),
             &characters_returning(Some(character.clone())),
+            &specs(),
             command(),
         )
         .expect("started");
 
         assert_eq!(out.session.id(), GameSessionId(42));
         assert_eq!(out.session.status(), GameStatus::Playing);
+        assert_eq!(
+            out.session.difficulty(),
+            Difficulty::HARDEST,
+            "difficulty comes from the command"
+        );
         assert_eq!(out.stage.id(), &StageId::new("stage_01"));
         assert_eq!(out.character, character);
         assert_eq!(
@@ -137,7 +158,7 @@ mod tests {
         let mut characters = MockCharacters::new();
         characters.expect_find().never();
         assert_eq!(
-            start_game(&stages_returning(None), &characters, command()).err(),
+            start_game(&stages_returning(None), &characters, &specs(), command()).err(),
             Some(StartGameError::StageNotFound(StageId::new("stage_01")))
         );
     }
@@ -145,8 +166,13 @@ mod tests {
     #[rstest]
     fn unknown_character_is_reported(stage: Stage) {
         assert_eq!(
-            start_game(&stages_returning(Some(stage)), &characters_returning(None), command())
-                .err(),
+            start_game(
+                &stages_returning(Some(stage)),
+                &characters_returning(None),
+                &specs(),
+                command()
+            )
+            .err(),
             Some(StartGameError::CharacterNotFound(PusherCharacterId::new(
                 "mop_rabbit"
             )))

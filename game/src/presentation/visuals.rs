@@ -55,7 +55,23 @@ pub(super) fn plugin(app: &mut App) {
     app.init_resource::<Cache>()
         .add_systems(Startup, load_manifest)
         .add_observer(attach_visual)
+        .add_systems(PostUpdate, refresh_placeholder_shapes)
         .add_systems(PostUpdate, face_camera.before(TransformSystems::Propagate));
+}
+
+/// 進化で寸法が変わった仮図形を差し替える。子EntityのBillboard・Modelは対象外。
+fn refresh_placeholder_shapes(
+    mut appearances: Query<(&Appearance, &mut Mesh3d), Changed<Appearance>>,
+    mut cache: ResMut<Cache>,
+    mut meshes: ResMut<Assets<Mesh>>,
+) {
+    for (appearance, mut mesh) in &mut appearances {
+        mesh.0 = cache
+            .meshes
+            .entry(silhouette_key(appearance.silhouette))
+            .or_insert_with(|| meshes.add(placeholder_mesh(appearance.silhouette)))
+            .clone();
+    }
 }
 
 fn load_manifest(mut commands: Commands, server: Res<AssetServer>) {

@@ -1,24 +1,25 @@
-//! GameSession集約（基本設計 3.4）。
-
-mod level;
+//! GameSession集約（基本設計 3.4, 3.12）。
 
 use std::collections::HashSet;
 
-pub use level::{LevelProgress, Upgrade, UpgradeError};
-
 use crate::{
+    difficulty::Difficulty,
     event::DomainEvent,
-    id::{BridgeId, EnemyId, EnemyTypeId, GameSessionId, GoalId, PusherCharacterId, StageId},
-    pusher::{PusherCharacter, PusherStats},
-    spec::{MedalSpec, MedalType, SpecCatalog},
-    stage::Stage,
+    evolution::{Evolution, EvolutionError, EvolutionGauge, MedalCollection},
+    id::{
+        BridgeId, EnemyId, EnemyTypeId, GameSessionId, GoalId, MedalId, PusherCharacterId, StageId,
+    },
+    pusher::PusherCharacter,
+    random::SessionRng,
+    spec::{EvolutionRules, MedalSpec, SpecCatalog},
+    stage::{SpawnEntry, Stage, WavePlan},
     time::Tick,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum GameStatus {
     Playing,
-    /// 【未確定】勝利条件の判定は未実装。
+    /// 最終Waveのボスを倒した
     Won,
     Lost {
         enemy: EnemyId,
@@ -31,7 +32,7 @@ pub enum GameSessionError {
     #[error("session is not in progress ({0:?})")]
     NotPlaying(GameStatus),
     #[error(transparent)]
-    Upgrade(#[from] UpgradeError),
+    Evolution(#[from] EvolutionError),
 }
 
 /// 敵の出現指示。EnemyIdは発行済み。
@@ -48,7 +49,12 @@ pub struct WaveProgress {
     wave: usize,
     /// 現Waveを開始したTick。出現は「開始Tick + 出現オフセット ≦ 現在のTick」で決まる
     started_at: Tick,
+    /// 出した通常の敵の数
     next: usize,
+    /// 出したボス（撃破でこのWaveをクリアする）
+    boss: Option<EnemyId>,
+    /// ボスを倒した。次に進めたTickから次のWaveを始める
+    cleared: bool,
 }
 
 impl WaveProgress {
@@ -63,9 +69,18 @@ pub struct GameSession {
     id: GameSessionId,
     stage_id: StageId,
     character_id: PusherCharacterId,
+    difficulty: Difficulty,
     status: GameStatus,
     waves: WaveProgress,
-    level: LevelProgress,
+    /// 所持しているメダル種とレベル（インゲームの成長。持ち越さない）
+    medals: MedalCollection,
+    gauge: EvolutionGauge,
+    /// この難易度での、メダル1枚の落下あたりのゲージのポイント
+    gauge_points: u32,
+    /// New! の候補を選ぶ決定的な乱数（セッションのシードから）
+    rng: SessionRng,
+    /// 進化画面で提示中の New!（ゲージが満タンになった時点で固定する）
+    offer: Option<MedalId>,
     /// 退場の二重判定を防ぐためのID集合。位置などの物理状態は持たない。
     alive_enemies: HashSet<EnemyId>,
     next_enemy_id: u64,
@@ -78,14 +93,22 @@ impl GameSession {
         id: GameSessionId,
         stage: &Stage,
         character: &PusherCharacter,
+        difficulty: Difficulty,
+        rules: &EvolutionRules,
+        seed: u64,
     ) -> (Self, DomainEvent) {
         let session = Self {
             id,
             stage_id: stage.id().clone(),
             character_id: character.id.clone(),
+            difficulty,
             status: GameStatus::Playing,
             waves: WaveProgress::default(),
-            level: LevelProgress::initial(),
+            medals: MedalCollection::default(),
+            gauge: EvolutionGauge::new(rules.threshold),
+            gauge_points: rules.points_per_medal(difficulty),
+            rng: SessionRng::seeded(seed),
+            offer: None,
             alive_enemies: HashSet::new(),
             next_enemy_id: 1,
             defeated: 0,
@@ -107,14 +130,24 @@ impl GameSession {
     pub fn character_id(&self) -> &PusherCharacterId {
         &self.character_id
     }
+    pub fn difficulty(&self) -> Difficulty {
+        self.difficulty
+    }
     pub fn status(&self) -> GameStatus {
         self.status
     }
     pub fn waves(&self) -> &WaveProgress {
         &self.waves
     }
-    pub fn level(&self) -> &LevelProgress {
-        &self.level
+    pub fn medals(&self) -> &MedalCollection {
+        &self.medals
+    }
+    pub fn gauge(&self) -> &EvolutionGauge {
+        &self.gauge
+    }
+    /// 進化画面の New! に提示中の、未所持の素材メダル（全部持っていれば `None`）。
+    pub fn evolution_offer(&self) -> Option<&MedalId> {
+        self.offer.as_ref()
     }
     pub fn alive_enemy_count(&self) -> usize {
         self.alive_enemies.len()
@@ -130,13 +163,20 @@ impl GameSession {
         }
     }
 
-    /// 現在のTickまでに出現すべき敵を出す。Playing以外では何もしない。
-    /// 現Waveの出現が終わり、かつ生存敵がいなくなったら、そのTickから次のWaveを始める。
+    /// 現在のTickまでに出現すべき敵（通常の敵と、終盤のボス）を出す。Playing以外では何もしない。
+    /// 前のWaveのボスを倒していたら、このTickから次のWaveを始める（出現時刻はこのTickからの相対）。
     pub fn advance(&mut self, stage: &Stage, now: Tick) -> Vec<SpawnOrder> {
         if self.ensure_playing().is_err() {
             return Vec::new();
         }
         let waves = stage.wave_plan().waves();
+        if self.waves.cleared && self.waves.wave + 1 < waves.len() {
+            self.waves = WaveProgress {
+                wave: self.waves.wave + 1,
+                started_at: now,
+                ..Default::default()
+            };
+        }
         let Some(wave) = waves.get(self.waves.wave) else {
             return Vec::new();
         };
@@ -146,42 +186,63 @@ impl GameSession {
             .iter()
             .take_while(|s| started + s.at <= now)
             .count();
-        let orders = pending[..due]
+        let mut orders: Vec<_> = pending[..due]
             .iter()
-            .map(|s| {
-                let enemy = EnemyId(self.next_enemy_id);
-                self.next_enemy_id += 1;
-                self.alive_enemies.insert(enemy);
-                SpawnOrder {
-                    enemy,
-                    kind: s.enemy.clone(),
-                    bridge: s.bridge,
-                    goal: s.goal,
-                }
-            })
+            .map(|s| self.spawn(stage, s))
             .collect();
         self.waves.next += due;
 
-        if self.waves.next >= wave.spawns().len()
-            && self.alive_enemies.is_empty()
-            && self.waves.wave + 1 < waves.len()
-        {
-            self.waves = WaveProgress {
-                wave: self.waves.wave + 1,
-                started_at: now,
-                next: 0,
-            };
+        if self.waves.boss.is_none() && started + wave.boss().at <= now {
+            let boss = self.spawn(stage, wave.boss());
+            self.waves.boss = Some(boss.enemy);
+            orders.push(boss);
         }
         orders
     }
 
+    /// 出現エントリのGoalがこの難易度で無効なら、Easy のGoal（必ず1つある）へ向かわせる。
+    fn spawn(&mut self, stage: &Stage, entry: &SpawnEntry) -> SpawnOrder {
+        let active = stage
+            .goal(entry.goal)
+            .is_some_and(|g| g.available_from <= self.difficulty);
+        let goal = if active {
+            entry.goal
+        } else {
+            stage
+                .active_goals(Difficulty::EASY)
+                .next()
+                .map_or(entry.goal, |g| g.id)
+        };
+        let enemy = EnemyId(self.next_enemy_id);
+        self.next_enemy_id += 1;
+        self.alive_enemies.insert(enemy);
+        SpawnOrder {
+            enemy,
+            kind: entry.enemy.clone(),
+            bridge: entry.bridge,
+            goal,
+        }
+    }
+
     /// 物理由来の結果。終了後・退場済みの敵は正常な遅れとして無視する（G3, G4）。
-    pub fn enemy_fell(&mut self, enemy: EnemyId) -> Option<DomainEvent> {
+    /// Waveのボスなら、そのWaveをクリアする（最終Waveなら勝利）。
+    pub fn enemy_fell(&mut self, enemy: EnemyId) -> Vec<DomainEvent> {
         if self.ensure_playing().is_err() || !self.alive_enemies.remove(&enemy) {
-            return None;
+            return Vec::new();
         }
         self.defeated = self.defeated.saturating_add(1);
-        Some(DomainEvent::EnemyDefeated { enemy })
+        let mut events = vec![DomainEvent::EnemyDefeated { enemy }];
+        if self.waves.boss == Some(enemy) {
+            let wave = self.waves.wave + 1;
+            if wave == WavePlan::WAVES {
+                self.status = GameStatus::Won;
+                events.push(DomainEvent::GameWon);
+            } else {
+                self.waves.cleared = true;
+                events.push(DomainEvent::WaveCleared { wave });
+            }
+        }
+        events
     }
 
     /// Goal到達。成立すると同じ呼び出しの中でLostへ遷移する（G2）。
@@ -196,30 +257,67 @@ impl GameSession {
         ]
     }
 
-    /// 成長補正済みのメダル定義。
-    pub fn medal_spec(&self, medal: MedalType, specs: &SpecCatalog) -> Option<MedalSpec> {
-        specs
-            .medal(medal)
-            .map(|base| self.level.medal_spec(medal, *base))
+    /// メダルが奈落へ落ちた（tickごとの枚数の集計）。進化ゲージに加算し、満タンになったら知らせる。
+    /// 満タンになった時点で New! の候補（未所持の素材から1つ）を決めて固定する。
+    pub fn medals_fell(&mut self, count: u32, specs: &SpecCatalog) -> Vec<DomainEvent> {
+        if self.ensure_playing().is_err() || !self.can_evolve(specs) {
+            return Vec::new();
+        }
+        let points = count.saturating_mul(self.gauge_points);
+        if !self.gauge.fill(points) {
+            return Vec::new();
+        }
+        let unowned = || {
+            specs
+                .elements()
+                .filter(|m| self.medals.level(m).is_none())
+        };
+        self.offer = self
+            .rng
+            .pick(unowned().count())
+            .and_then(|i| unowned().nth(i))
+            .cloned();
+        vec![DomainEvent::EvolutionReady]
     }
 
-    /// 成長補正済みのPusher能力値。
-    pub fn pusher_stats(&self, character: &PusherCharacter) -> PusherStats {
-        self.level.pusher_stats(character.base_stats)
+    /// 進化先が尽きたらゲージを溜めず、選べない進化画面による停止を防ぐ。
+    fn can_evolve(&self, specs: &SpecCatalog) -> bool {
+        self.medals
+            .owned()
+            .any(|(_, level)| level < crate::evolution::MedalLevel::MAX)
+            || specs
+                .elements()
+                .any(|medal| self.medals.level(medal).is_none())
+            || specs.fusions().any(|(a, b, result)| {
+                self.medals.level(a) == Some(crate::evolution::MedalLevel::MAX)
+                    && self.medals.level(b) == Some(crate::evolution::MedalLevel::MAX)
+                    && self.medals.level(result).is_none()
+            })
     }
 
-    /// 強化後の値を検証して確定する。失敗時は状態を変更しない。
-    pub fn apply_level_up(
+    /// 進化（レベルアップ・錬成・New! の獲得）。ゲージが満タンでなければ受け付けない。
+    /// 成功するとゲージを空にし、提示中の New! も取り下げる。失敗時は状態を変えない。
+    pub fn evolve(
         &mut self,
-        upgrade: Upgrade,
+        evolution: Evolution,
         specs: &SpecCatalog,
-        character: &PusherCharacter,
     ) -> Result<DomainEvent, GameSessionError> {
         self.ensure_playing()?;
-        let level = self
-            .level
-            .apply(upgrade, specs, character.base_stats)?;
-        Ok(DomainEvent::LevelUpCompleted { level, upgrade })
+        if !self.gauge.is_full() {
+            return Err(EvolutionError::NotReady.into());
+        }
+        let evolved =
+            self.medals
+                .evolve(evolution, |a, b| specs.fusion(a, b), self.offer.as_ref())?;
+        self.gauge.reset();
+        self.offer = None;
+        Ok(DomainEvent::Evolved { medal: evolved.medal, level: evolved.level })
+    }
+
+    /// 所持しているメダル種の、今のレベルでの物理特性。所持していなければ `None`。
+    pub fn medal_spec(&self, medal: &MedalId, specs: &SpecCatalog) -> Option<MedalSpec> {
+        let level = self.medals.level(medal)?;
+        specs.medal(medal, level).copied()
     }
 }
 
@@ -230,12 +328,13 @@ mod tests {
 
     use super::*;
     use crate::{
-        positive::{Positive, fixture::p},
-        pusher::MovementPattern,
-        spec::{SpecialKind, fixture::catalog},
+        evolution::MedalLevel,
+        positive::fixture::p,
+        pusher::{MovementPattern, PusherStats},
+        spec::fixture::{catalog, fire, parts as spec_parts, sauna, water},
         stage::{
-            StageParts, Wave, WavePlan,
-            fixture::{parts, spawn, stage},
+            Goal, StageParts, Wave,
+            fixture::{parts, spawn, stage, waves_with_first},
         },
     };
 
@@ -253,15 +352,27 @@ mod tests {
         }
     }
 
+    fn start(stage: &Stage, difficulty: Difficulty) -> GameSession {
+        let rules = *catalog().evolution();
+        GameSession::start(GameSessionId(1), stage, &character(), difficulty, &rules, 1).0
+    }
+
     #[fixture]
     fn started(stage: Stage) -> (GameSession, Stage) {
-        let (session, _) = GameSession::start(GameSessionId(1), &stage, &character());
-        (session, stage)
+        (start(&stage, Difficulty::EASY), stage)
     }
 
     #[rstest]
     fn start_emits_game_started_with_initial_growth(stage: Stage) {
-        let (session, event) = GameSession::start(GameSessionId(7), &stage, &character());
+        let rules = *catalog().evolution();
+        let (session, event) = GameSession::start(
+            GameSessionId(7),
+            &stage,
+            &character(),
+            Difficulty::HARDEST,
+            &rules,
+            9,
+        );
         assert_eq!(
             event,
             DomainEvent::GameStarted {
@@ -271,56 +382,151 @@ mod tests {
             }
         );
         assert_eq!(session.status(), GameStatus::Playing);
-        assert_eq!(*session.level(), LevelProgress::initial());
+        assert_eq!(session.difficulty(), Difficulty::HARDEST);
+        assert_eq!(*session.medals(), MedalCollection::default());
+        assert!(!session.gauge().is_full());
         assert_eq!(session.ensure_playing(), Ok(()));
     }
 
+    // ── Wave ──
+
+    fn ids(orders: &[SpawnOrder]) -> Vec<u64> {
+        orders.iter().map(|o| o.enemy.0).collect()
+    }
+
+    /// 第1Waveを最後まで出し、その中ボスのIDを返す（通常1・2、中ボス3）。
+    fn spawn_first_wave(session: &mut GameSession, stage: &Stage) -> EnemyId {
+        let spawned = session.advance(stage, Tick(120));
+        spawned.last().expect("boss spawned").enemy
+    }
+
     #[rstest]
-    fn tick_spawns_enemies_on_schedule(started: (GameSession, Stage)) {
+    fn regulars_then_boss_spawn_on_schedule(started: (GameSession, Stage)) {
         let (mut session, stage) = started;
-        let first = session.advance(&stage, Tick(30));
-        assert_eq!(first.iter().map(|o| o.enemy).collect::<Vec<_>>(), [EnemyId(1)]);
+        assert_eq!(ids(&session.advance(&stage, Tick(30))), [1]);
         assert!(session.advance(&stage, Tick(59)).is_empty());
-        assert_eq!(session.advance(&stage, Tick(60))[0].enemy, EnemyId(2));
-        assert_eq!(session.alive_enemy_count(), 2);
-    }
-
-    #[rstest]
-    fn next_wave_starts_after_all_enemies_leave(parts: StageParts) {
-        let mut parts = parts;
-        parts.wave_plan =
-            WavePlan::new(vec![Wave::new(vec![spawn(0, 1, 1)]), Wave::new(vec![spawn(0, 1, 1)])]);
-        let stage = Stage::new(parts).expect("valid");
-        let (mut session, _) = GameSession::start(GameSessionId(1), &stage, &character());
-
-        let enemy = session.advance(&stage, Tick(0))[0].enemy;
-        assert_eq!(session.waves().wave(), 0, "enemy still alive");
-        session.enemy_fell(enemy);
-        assert!(session.advance(&stage, Tick(0)).is_empty());
-        assert_eq!(session.waves().wave(), 1);
-        assert_eq!(session.advance(&stage, Tick(0))[0].enemy, EnemyId(2));
-    }
-
-    /// 次のWaveの出現時刻は、そのWaveを始めたTickからの相対で決まる。
-    #[rstest]
-    fn next_wave_timing_is_relative_to_its_start(parts: StageParts) {
-        let mut parts = parts;
-        parts.wave_plan = WavePlan::new(vec![
-            Wave::new(vec![spawn(0, 1, 1)]),
-            Wave::new(vec![spawn(30, 1, 1)]),
-        ]);
-        let stage = Stage::new(parts).expect("valid");
-        let (mut session, _) = GameSession::start(GameSessionId(1), &stage, &character());
-
-        let enemy = session.advance(&stage, Tick(0))[0].enemy;
-        session.enemy_fell(enemy);
-        assert!(
-            session.advance(&stage, Tick(100)).is_empty(),
-            "wave 2 starts at tick 100"
+        assert_eq!(ids(&session.advance(&stage, Tick(60))), [2]);
+        assert!(session.advance(&stage, Tick(119)).is_empty());
+        assert_eq!(
+            ids(&session.advance(&stage, Tick(120))),
+            [3],
+            "mid boss at the end of the wave"
         );
-        assert!(session.advance(&stage, Tick(129)).is_empty());
-        assert_eq!(session.advance(&stage, Tick(130)).len(), 1);
+        assert!(
+            session.advance(&stage, Tick(500)).is_empty(),
+            "the boss spawns only once"
+        );
+        assert_eq!(session.alive_enemy_count(), 3);
     }
+
+    #[rstest]
+    fn defeating_regulars_does_not_clear_the_wave(started: (GameSession, Stage)) {
+        let (mut session, stage) = started;
+        session.advance(&stage, Tick(60));
+        assert_eq!(
+            session.enemy_fell(EnemyId(1)),
+            [DomainEvent::EnemyDefeated { enemy: EnemyId(1) }]
+        );
+        session.enemy_fell(EnemyId(2));
+        session.advance(&stage, Tick(100));
+        assert_eq!(session.waves().wave(), 0);
+    }
+
+    #[rstest]
+    fn defeating_the_mid_boss_clears_the_wave(started: (GameSession, Stage)) {
+        let (mut session, stage) = started;
+        let boss = spawn_first_wave(&mut session, &stage);
+        assert_eq!(
+            session.enemy_fell(boss),
+            [
+                DomainEvent::EnemyDefeated { enemy: boss },
+                DomainEvent::WaveCleared { wave: 1 }
+            ]
+        );
+        assert_eq!(session.alive_enemy_count(), 2, "regular enemies stay");
+        assert_eq!(session.status(), GameStatus::Playing);
+    }
+
+    /// 次のWaveは、クリア後に最初に進めたTickから始まり、出現時刻はそのTickからの相対。
+    #[rstest]
+    fn next_wave_starts_from_the_tick_after_clearing(started: (GameSession, Stage)) {
+        let (mut session, stage) = started;
+        let boss = spawn_first_wave(&mut session, &stage);
+        session.enemy_fell(boss);
+
+        assert_eq!(
+            ids(&session.advance(&stage, Tick(200))),
+            [4],
+            "wave 2 starts at tick 200"
+        );
+        assert_eq!(session.waves().wave(), 1);
+        assert!(session.advance(&stage, Tick(229)).is_empty());
+        assert_eq!(ids(&session.advance(&stage, Tick(230))), [5], "wave 2 boss at +30");
+    }
+
+    /// 最終Waveのボスを倒すと勝利する。
+    #[rstest]
+    fn defeating_the_final_boss_wins_the_game(started: (GameSession, Stage)) {
+        let (mut session, stage) = started;
+        let mut now = 0;
+        for wave in 1..=3 {
+            now += 1_000;
+            // Waveを始めるTickと、ボスが出るTick（+500 なら必ず過ぎている）まで進める
+            let mut spawned = session.advance(&stage, Tick(now));
+            spawned.extend(session.advance(&stage, Tick(now + 500)));
+            let boss = spawned.last().expect("boss spawns last").enemy;
+            assert_eq!(
+                session.enemy_fell(boss).last(),
+                Some(&DomainEvent::WaveCleared { wave })
+            );
+        }
+        let final_boss = session
+            .advance(&stage, Tick(now + 1_000))
+            .last()
+            .expect("final boss")
+            .enemy;
+        assert_eq!(session.waves().wave(), 3);
+
+        assert_eq!(
+            session.enemy_fell(final_boss),
+            [DomainEvent::EnemyDefeated { enemy: final_boss }, DomainEvent::GameWon]
+        );
+        assert_eq!(session.status(), GameStatus::Won);
+        assert_eq!(
+            session.ensure_playing(),
+            Err(GameSessionError::NotPlaying(GameStatus::Won))
+        );
+        assert!(session.advance(&stage, Tick(now + 10_000)).is_empty());
+    }
+
+    // ── 難易度とGoal ──
+
+    /// Goal 2 は最難でだけ有効。第1Waveの通常敵が Goal 2 を目指す計画。
+    fn stage_with_hard_goal(mut parts: StageParts) -> Stage {
+        let hard_goal = Goal {
+            id: GoalId(2),
+            available_from: Difficulty::HARDEST,
+            ..parts.goals[0].clone()
+        };
+        parts.goals.push(hard_goal);
+        parts.wave_plan = waves_with_first(Wave::new(vec![spawn(0, 1, 2)], spawn(10, 1, 1)));
+        Stage::new(parts).expect("valid")
+    }
+
+    #[rstest]
+    #[case::easy_redirects_to_the_easy_goal(Difficulty::EASY, GoalId(1))]
+    #[case::hardest_uses_the_planned_goal(Difficulty::HARDEST, GoalId(2))]
+    fn enemies_head_only_for_goals_active_on_the_difficulty(
+        parts: StageParts,
+        #[case] difficulty: Difficulty,
+        #[case] goal: GoalId,
+    ) {
+        let stage = stage_with_hard_goal(parts);
+        let mut session = start(&stage, difficulty);
+        assert_eq!(session.advance(&stage, Tick(0))[0].goal, goal);
+    }
+
+    // ── 敗北・退場 ──
 
     #[rstest]
     fn enemy_reaching_goal_loses_the_game(started: (GameSession, Stage)) {
@@ -340,6 +546,7 @@ mod tests {
     fn results_and_requests_after_loss_are_ignored_or_rejected(started: (GameSession, Stage)) {
         let (mut session, stage) = started;
         session.advance(&stage, Tick(60));
+        session.medals_fell(100, &catalog());
         session.enemy_reached_goal(EnemyId(1), GoalId(1));
         let lost = session.status();
 
@@ -348,15 +555,12 @@ mod tests {
                 .enemy_reached_goal(EnemyId(2), GoalId(1))
                 .is_empty()
         );
-        assert_eq!(session.enemy_fell(EnemyId(2)), None);
+        assert!(session.enemy_fell(EnemyId(2)).is_empty());
+        assert!(session.medals_fell(100, &catalog()).is_empty());
         assert!(session.advance(&stage, Tick(600)).is_empty());
         assert_eq!(session.ensure_playing(), Err(GameSessionError::NotPlaying(lost)));
         assert_eq!(
-            session.apply_level_up(
-                Upgrade::PusherSpeed { factor: p(2.0) },
-                &catalog(),
-                &character()
-            ),
+            session.evolve(Evolution::LevelUp(MedalId::normal()), &catalog()),
             Err(GameSessionError::NotPlaying(lost))
         );
     }
@@ -365,8 +569,8 @@ mod tests {
     fn enemy_leaves_only_once(started: (GameSession, Stage)) {
         let (mut session, stage) = started;
         let enemy = session.advance(&stage, Tick(0))[0].enemy;
-        assert_eq!(session.enemy_fell(enemy), Some(DomainEvent::EnemyDefeated { enemy }));
-        assert_eq!(session.enemy_fell(enemy), None);
+        assert_eq!(session.enemy_fell(enemy), [DomainEvent::EnemyDefeated { enemy }]);
+        assert!(session.enemy_fell(enemy).is_empty());
         assert!(session.enemy_reached_goal(enemy, GoalId(1)).is_empty());
         assert_eq!(session.status(), GameStatus::Playing);
     }
@@ -374,127 +578,12 @@ mod tests {
     #[rstest]
     fn unknown_enemy_is_ignored(started: (GameSession, Stage)) {
         let (mut session, _) = started;
-        assert_eq!(session.enemy_fell(EnemyId(99)), None);
+        assert!(session.enemy_fell(EnemyId(99)).is_empty());
         assert!(
             session
                 .enemy_reached_goal(EnemyId(99), GoalId(1))
                 .is_empty()
         );
-    }
-
-    /// (Normalメダル質量, Pusher速度, Pusher推力)
-    fn effective(session: &GameSession, catalog: &SpecCatalog) -> (f32, f32, f32) {
-        let mass = session
-            .medal_spec(MedalType::Normal, catalog)
-            .expect("normal")
-            .mass
-            .get();
-        let stats = session.pusher_stats(&character());
-        (mass, stats.speed.get(), stats.push_force.get())
-    }
-
-    #[rstest]
-    #[case::medal_mass(Upgrade::MedalMass { medal: MedalType::Normal, factor: p(2.0) }, (2.0, 2.0, 100.0))]
-    #[case::pusher_speed(Upgrade::PusherSpeed { factor: p(1.5) }, (1.0, 3.0, 100.0))]
-    #[case::pusher_force(Upgrade::PusherForce { factor: p(3.0) }, (1.0, 2.0, 300.0))]
-    #[case::shrink(Upgrade::MedalMass { medal: MedalType::Normal, factor: p(0.5) }, (0.5, 2.0, 100.0))]
-    fn level_up_changes_effective_stats(
-        started: (GameSession, Stage),
-        catalog: SpecCatalog,
-        #[case] upgrade: Upgrade,
-        #[case] expected: (f32, f32, f32),
-    ) {
-        let (mut session, _) = started;
-        assert_eq!(
-            session.apply_level_up(upgrade, &catalog, &character()),
-            Ok(DomainEvent::LevelUpCompleted { level: 2, upgrade })
-        );
-        assert_eq!(effective(&session, &catalog), expected);
-    }
-
-    #[rstest]
-    fn upgrades_compound(started: (GameSession, Stage), catalog: SpecCatalog) {
-        let (mut session, _) = started;
-        let twice = Upgrade::MedalMass { medal: MedalType::Normal, factor: p(2.0) };
-        let speed = Upgrade::PusherSpeed { factor: p(2.0) };
-        for upgrade in [twice, speed, twice, speed] {
-            session
-                .apply_level_up(upgrade, &catalog, &character())
-                .expect("valid upgrade");
-        }
-        assert_eq!(effective(&session, &catalog), (4.0, 8.0, 100.0));
-        assert_eq!(session.level().level(), 5);
-    }
-
-    /// 基礎値はメダル質量1.0・速度2.0・推力100.0。メダルは事前に×2して1.0超にしておく
-    /// （1.0 × f32::MAX は有限値のため）。
-    #[rstest]
-    #[case::medal_mass(Upgrade::MedalMass { medal: MedalType::Normal, factor: p(f32::MAX) })]
-    #[case::pusher_speed(Upgrade::PusherSpeed { factor: p(f32::MAX) })]
-    #[case::pusher_force(Upgrade::PusherForce { factor: p(f32::MAX) })]
-    fn upgrade_overflowing_is_rejected_without_state_change(
-        started: (GameSession, Stage),
-        catalog: SpecCatalog,
-        #[case] upgrade: Upgrade,
-    ) {
-        let (mut session, _) = started;
-        let boost = Upgrade::MedalMass { medal: MedalType::Normal, factor: p(2.0) };
-        session
-            .apply_level_up(boost, &catalog, &character())
-            .expect("valid upgrade");
-        let before = (session.level().clone(), effective(&session, &catalog));
-        assert_eq!(
-            session.apply_level_up(upgrade, &catalog, &character()),
-            Err(GameSessionError::Upgrade(UpgradeError::Overflow(upgrade)))
-        );
-        assert_eq!((session.level().clone(), effective(&session, &catalog)), before);
-    }
-
-    #[rstest]
-    fn upgrade_of_medal_without_spec_is_rejected(
-        started: (GameSession, Stage),
-        catalog: SpecCatalog,
-    ) {
-        let (mut session, _) = started;
-        let fire = MedalType::Special(SpecialKind::Fire);
-        assert_eq!(
-            session.apply_level_up(
-                Upgrade::MedalMass { medal: fire, factor: p(2.0) },
-                &catalog,
-                &character()
-            ),
-            Err(GameSessionError::Upgrade(UpgradeError::MissingMedalSpec(fire)))
-        );
-        assert_eq!(session.level().level(), 1);
-    }
-
-    #[rstest]
-    fn medal_without_spec_is_none(started: (GameSession, Stage), catalog: SpecCatalog) {
-        assert_eq!(
-            started
-                .0
-                .medal_spec(MedalType::Special(SpecialKind::Fire), &catalog),
-            None
-        );
-    }
-
-    fn upgrade() -> impl Strategy<Value = Upgrade> {
-        let factor = any::<f32>().prop_filter_map("positive", |v| Positive::new(v).ok());
-        prop_oneof![
-            factor
-                .clone()
-                .prop_map(|factor| Upgrade::MedalMass { medal: MedalType::Normal, factor }),
-            factor
-                .clone()
-                .prop_map(|factor| Upgrade::PusherSpeed { factor }),
-            factor.prop_map(|factor| Upgrade::PusherForce { factor }),
-        ]
-    }
-
-    #[derive(Debug, Clone)]
-    enum Op {
-        Fell(u64),
-        Goal(u64),
     }
 
     #[rstest]
@@ -510,6 +599,279 @@ mod tests {
         assert_eq!(session.defeated(), 2);
     }
 
+    // ── メダル進化 ──
+
+    fn lv(n: u8) -> MedalLevel {
+        MedalLevel::new(n).expect("valid level")
+    }
+
+    /// ゲージは10で満タン。Easy は1枚4ポイント、最難は1枚1ポイント（spec の fixture）。
+    #[rstest]
+    #[case::easy(Difficulty::EASY, 2, 3)]
+    #[case::hardest(Difficulty::HARDEST, 9, 10)]
+    fn falling_medals_fill_the_gauge_by_difficulty(
+        stage: Stage,
+        #[case] difficulty: Difficulty,
+        #[case] not_yet: u32,
+        #[case] enough: u32,
+    ) {
+        let mut session = start(&stage, difficulty);
+        assert!(session.medals_fell(not_yet, &catalog()).is_empty());
+        assert!(!session.gauge().is_full());
+        assert_eq!(
+            session.medals_fell(enough - not_yet, &catalog()),
+            [DomainEvent::EvolutionReady]
+        );
+        assert!(session.gauge().is_full());
+        assert!(session.medals_fell(5, &catalog()).is_empty(), "reported only once");
+    }
+
+    #[rstest]
+    fn evolution_needs_a_full_gauge(started: (GameSession, Stage), catalog: SpecCatalog) {
+        let (mut session, _) = started;
+        let before = session.medals().clone();
+        assert_eq!(
+            session.evolve(Evolution::LevelUp(MedalId::normal()), &catalog),
+            Err(GameSessionError::Evolution(EvolutionError::NotReady))
+        );
+        assert_eq!(*session.medals(), before);
+    }
+
+    #[rstest]
+    fn level_up_changes_the_medal_spec_and_empties_the_gauge(
+        started: (GameSession, Stage),
+        catalog: SpecCatalog,
+    ) {
+        let (mut session, _) = started;
+        session.medals_fell(10, &catalog);
+        assert_eq!(
+            session.evolve(Evolution::LevelUp(MedalId::normal()), &catalog),
+            Ok(DomainEvent::Evolved { medal: MedalId::normal(), level: lv(2) })
+        );
+        assert_eq!(
+            session
+                .medal_spec(&MedalId::normal(), &catalog)
+                .map(|s| s.mass.get()),
+            Some(2.0)
+        );
+        assert!(!session.gauge().is_full());
+    }
+
+    #[rstest]
+    fn rejected_evolution_keeps_the_gauge_full(
+        started: (GameSession, Stage),
+        catalog: SpecCatalog,
+    ) {
+        let (mut session, _) = started;
+        session.medals_fell(10, &catalog);
+        assert_eq!(
+            session.evolve(Evolution::LevelUp(fire()), &catalog),
+            Err(GameSessionError::Evolution(EvolutionError::NotOwned(fire())))
+        );
+        assert!(session.gauge().is_full(), "the player can choose again");
+    }
+
+    #[rstest]
+    fn fusion_uses_the_recipes_of_the_catalog(started: (GameSession, Stage), catalog: SpecCatalog) {
+        let (mut session, _) = started;
+        // Normal を Lv.4 にする（3回）
+        for _ in 0..3 {
+            session.medals_fell(10, &catalog);
+            session
+                .evolve(Evolution::LevelUp(MedalId::normal()), &catalog)
+                .expect("level up");
+        }
+        session.medals_fell(10, &catalog);
+        assert_eq!(
+            session.evolve(Evolution::Fuse(MedalId::normal(), fire()), &catalog),
+            Err(GameSessionError::Evolution(EvolutionError::NotOwned(fire()))),
+            "Fire is not owned yet"
+        );
+        assert_eq!(session.medals().level(&MedalId::normal()), Some(lv(4)));
+        assert_eq!(session.medal_spec(&sauna(), &catalog), None, "not owned");
+    }
+
+    // ── New! ──
+
+    fn fill(session: &mut GameSession, catalog: &SpecCatalog) -> Option<MedalId> {
+        session.medals_fell(10, catalog);
+        session.evolution_offer().cloned()
+    }
+
+    #[rstest]
+    fn new_offer_is_an_unowned_element_fixed_when_the_gauge_fills(
+        started: (GameSession, Stage),
+        catalog: SpecCatalog,
+    ) {
+        let (mut session, _) = started;
+        assert_eq!(session.evolution_offer(), None, "nothing before the gauge fills");
+        let offer = fill(&mut session, &catalog).expect("an element is offered");
+        assert!([fire(), water()].contains(&offer));
+        session.medals_fell(10, &catalog);
+        assert_eq!(
+            session.evolution_offer(),
+            Some(&offer),
+            "fixed while the screen is open"
+        );
+    }
+
+    #[rstest]
+    fn same_seed_offers_the_same_medal_and_seeds_cover_every_element(
+        stage: Stage,
+        catalog: SpecCatalog,
+    ) {
+        let rules = *catalog.evolution();
+        let offer = |seed| {
+            let (mut session, _) = GameSession::start(
+                GameSessionId(1),
+                &stage,
+                &character(),
+                Difficulty::EASY,
+                &rules,
+                seed,
+            );
+            fill(&mut session, &catalog).expect("offered")
+        };
+        assert_eq!(offer(5), offer(5));
+        let seen: HashSet<_> = (0..64).map(offer).collect();
+        assert_eq!(seen, HashSet::from([fire(), water()]));
+    }
+
+    #[rstest]
+    fn acquiring_the_offer_adds_it_and_clears_the_offer(
+        started: (GameSession, Stage),
+        catalog: SpecCatalog,
+    ) {
+        let (mut session, _) = started;
+        let offer = fill(&mut session, &catalog).expect("offered");
+        assert_eq!(
+            session.evolve(Evolution::Acquire(offer.clone()), &catalog),
+            Ok(DomainEvent::Evolved { medal: offer.clone(), level: MedalLevel::MIN })
+        );
+        assert_eq!(session.medals().level(&offer), Some(MedalLevel::MIN));
+        assert_eq!(session.evolution_offer(), None);
+        assert!(!session.gauge().is_full());
+    }
+
+    #[rstest]
+    fn level_up_also_clears_the_offer(started: (GameSession, Stage), catalog: SpecCatalog) {
+        let (mut session, _) = started;
+        fill(&mut session, &catalog);
+        session
+            .evolve(Evolution::LevelUp(MedalId::normal()), &catalog)
+            .expect("level up");
+        assert_eq!(session.evolution_offer(), None);
+    }
+
+    #[rstest]
+    fn acquiring_a_medal_not_offered_is_rejected(
+        started: (GameSession, Stage),
+        catalog: SpecCatalog,
+    ) {
+        let (mut session, _) = started;
+        let offer = fill(&mut session, &catalog).expect("offered");
+        let other = if offer == fire() {
+            water()
+        } else {
+            fire()
+        };
+        let before = session.medals().clone();
+        assert_eq!(
+            session.evolve(Evolution::Acquire(other.clone()), &catalog),
+            Err(GameSessionError::Evolution(EvolutionError::NotOffered(other)))
+        );
+        assert_eq!(*session.medals(), before);
+        assert_eq!(session.evolution_offer(), Some(&offer), "the player can choose again");
+    }
+
+    #[rstest]
+    fn offers_skip_owned_elements_and_stop_when_all_are_owned(
+        started: (GameSession, Stage),
+        catalog: SpecCatalog,
+    ) {
+        let (mut session, _) = started;
+        let first = fill(&mut session, &catalog).expect("offered");
+        session
+            .evolve(Evolution::Acquire(first.clone()), &catalog)
+            .expect("acquire");
+        let second = fill(&mut session, &catalog).expect("the other element");
+        assert_ne!(first, second);
+        session
+            .evolve(Evolution::Acquire(second), &catalog)
+            .expect("acquire");
+        assert_eq!(fill(&mut session, &catalog), None, "every element is owned");
+        assert!(session.gauge().is_full(), "level up and fusion are still possible");
+    }
+
+    #[rstest]
+    fn unowned_medal_has_no_spec(started: (GameSession, Stage), catalog: SpecCatalog) {
+        assert_eq!(started.0.medal_spec(&fire(), &catalog), None);
+        assert_eq!(
+            started
+                .0
+                .medal_spec(&MedalId::normal(), &catalog)
+                .map(|s| s.mass.get()),
+            Some(1.0)
+        );
+    }
+
+    #[rstest]
+    fn exhausted_evolutions_do_not_open_an_unusable_offer(
+        started: (GameSession, Stage),
+        catalog: SpecCatalog,
+    ) {
+        let (mut session, _) = started;
+        // すべて取得・Lv.4化し、錬成後の素材も再取得する。
+        for _ in 0..40 {
+            fill(&mut session, &catalog);
+            let next = session
+                .medals()
+                .owned()
+                .find(|(_, l)| *l < MedalLevel::MAX)
+                .map(|(m, _)| Evolution::LevelUp(m.clone()))
+                .or_else(|| {
+                    session
+                        .evolution_offer()
+                        .cloned()
+                        .map(Evolution::Acquire)
+                })
+                .or_else(|| {
+                    (session.medals().level(&sauna()).is_none())
+                        .then(|| Evolution::Fuse(fire(), water()))
+                });
+            let Some(next) = next else {
+                break;
+            };
+            session
+                .evolve(next, &catalog)
+                .expect("valid evolution");
+        }
+        assert_eq!(session.medals().owned().count(), 4);
+        assert!(
+            session
+                .medals()
+                .owned()
+                .all(|(_, l)| l == MedalLevel::MAX)
+        );
+        assert!(!session.gauge().is_full(), "there must be no empty evolution screen");
+        assert!(session.medals_fell(100, &catalog).is_empty());
+    }
+
+    #[derive(Debug, Clone)]
+    enum Op {
+        Fell(u64),
+        Goal(u64),
+    }
+
+    fn evolution() -> impl Strategy<Value = Evolution> {
+        let medal =
+            prop_oneof![Just(MedalId::normal()), Just(fire()), Just(water()), Just(sauna())];
+        prop_oneof![
+            medal.clone().prop_map(Evolution::LevelUp),
+            (medal.clone(), medal).prop_map(|(a, b)| Evolution::Fuse(a, b)),
+        ]
+    }
+
     proptest! {
         /// どんな順序で物理結果が届いても、各敵の退場イベントは高々1回（G4）。
         #[test]
@@ -521,7 +883,7 @@ mod tests {
             let mut left = std::collections::HashMap::<EnemyId, usize>::new();
             for op in ops {
                 let events = match op {
-                    Op::Fell(id) => session.enemy_fell(EnemyId(id)).into_iter().collect(),
+                    Op::Fell(id) => session.enemy_fell(EnemyId(id)),
                     Op::Goal(id) => session.enemy_reached_goal(EnemyId(id), GoalId(1)),
                 };
                 for e in events {
@@ -533,16 +895,18 @@ mod tests {
             prop_assert!(left.values().all(|&n| n == 1));
         }
 
-        /// どんな倍率を重ねても、成功した強化はレベルを1上げ、失敗した強化は状態を変えない。
+        /// どんな進化を試しても、失敗した進化は所持メダルもゲージも変えない（全か無か）。
         #[test]
-        fn upgrades_are_all_or_nothing(upgrades in prop::collection::vec(upgrade(), 0..20)) {
-            let catalog = catalog();
+        fn evolutions_are_all_or_nothing(evolutions in prop::collection::vec(evolution(), 0..30)) {
+            let catalog = SpecCatalog::new(spec_parts()).expect("valid");
             let (mut session, _) = started(stage(parts()));
-            for upgrade in upgrades {
-                let before = session.level().clone();
-                match session.apply_level_up(upgrade, &catalog, &character()) {
-                    Ok(_) => prop_assert_eq!(session.level().level(), before.level() + 1),
-                    Err(_) => prop_assert_eq!(session.level(), &before),
+            for evolution in evolutions {
+                session.medals_fell(10, &catalog);
+                let before = (session.medals().clone(), *session.gauge());
+                if session.evolve(evolution, &catalog).is_err() {
+                    prop_assert_eq!((session.medals().clone(), *session.gauge()), before);
+                } else {
+                    prop_assert!(!session.gauge().is_full());
                 }
             }
         }

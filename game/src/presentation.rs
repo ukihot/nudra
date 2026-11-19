@@ -2,6 +2,7 @@
 //! Infrastructureを参照しない。`port` の Message・Resource・Component だけを使う。
 
 mod camera;
+mod evolution;
 mod feedback;
 mod hud;
 mod input;
@@ -26,6 +27,7 @@ pub(crate) fn plugin(app: &mut App) {
         input::plugin,
         select::plugin,
         hud::plugin,
+        evolution::plugin,
         feedback::plugin,
     ));
 }

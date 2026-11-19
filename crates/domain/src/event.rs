@@ -1,7 +1,6 @@
 use crate::{
-    id::{EnemyId, EnemyTypeId, GameSessionId, GoalId, PusherCharacterId, StageId},
-    session::Upgrade,
-    spec::MedalType,
+    evolution::MedalLevel,
+    id::{EnemyId, EnemyTypeId, GameSessionId, GoalId, MedalId, PusherCharacterId, StageId},
 };
 
 /// ゲーム上の意味を持つ出来事。集約・ドメイン関数の戻り値として返す（基本設計 3.9）。
@@ -13,7 +12,7 @@ pub enum DomainEvent {
         character: PusherCharacterId,
     },
     MedalLaunched {
-        medal: MedalType,
+        medal: MedalId,
     },
     EnemySpawned {
         enemy: EnemyId,
@@ -31,8 +30,17 @@ pub enum DomainEvent {
         enemy: EnemyId,
         goal: GoalId,
     },
-    LevelUpCompleted {
-        level: u32,
-        upgrade: Upgrade,
+    /// Waveのボスを倒した（1始まりのWave番号）
+    WaveCleared {
+        wave: usize,
+    },
+    /// 最終Waveのボスを倒した
+    GameWon,
+    /// 進化ゲージが満タンになった（進化画面を出す）
+    EvolutionReady,
+    /// 進化した: そのメダル種がこのレベルになった（錬成なら新しいメダルの Lv.1）
+    Evolved {
+        medal: MedalId,
+        level: MedalLevel,
     },
 }

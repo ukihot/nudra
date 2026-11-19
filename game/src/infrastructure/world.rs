@@ -5,11 +5,12 @@ use application::PusherSetup;
 use avian3d::prelude::*;
 use bevy::prelude::*;
 use domain::{
-    id::{EnemyId, GoalId, PusherCharacterId, RailId},
+    difficulty::Difficulty,
+    id::{EnemyId, GoalId, MedalId, PusherCharacterId, RailId},
     launch::LaunchPlan,
     navigation::Route,
     pusher::{MovementState, PusherStats},
-    spec::{EnemySpec, MedalSpec, MedalType},
+    spec::{EnemySpec, MedalSpec},
     stage::{Shape, Stage},
 };
 
@@ -21,8 +22,8 @@ use crate::{
 
 // ── Component（Domainの値を包むnewtype） ───────────────────
 
-#[derive(Component, Debug, Clone, Copy)]
-pub struct MedalKind(pub MedalType);
+#[derive(Component, Debug, Clone)]
+pub struct MedalKind(pub MedalId);
 
 /// Domain ID と Bevy Entity の関連付けはここだけ（基本設計 3.7）。
 #[derive(Component, Debug, Clone, Copy)]
@@ -80,7 +81,7 @@ fn static_box(key: &'static str, size: Vec3, transform: Transform, layer: Layer)
 }
 
 /// 地形・橋・出現領域・奈落・Goal・カタパルトを生成する。
-pub fn spawn_stage(commands: &mut Commands, stage: &Stage) {
+pub fn spawn_stage(commands: &mut Commands, stage: &Stage, difficulty: Difficulty) {
     let floor = stage.geometry();
     let floor_center = Vec3::new(0.0, floor.floor_y - FLOOR_THICKNESS / 2.0, 0.0);
     match floor.shape {
@@ -142,7 +143,7 @@ pub fn spawn_stage(commands: &mut Commands, stage: &Stage) {
         ));
     }
 
-    for goal in stage.goals() {
+    for goal in stage.active_goals(difficulty) {
         let radius = goal.radius.get();
         commands.spawn((
             GoalZone(goal.id),
@@ -165,10 +166,10 @@ pub fn spawn_stage(commands: &mut Commands, stage: &Stage) {
     ));
 }
 
-fn medal_bundle(medal: MedalType, spec: &MedalSpec, transform: Transform) -> impl Bundle {
+fn medal_bundle(medal: &MedalId, spec: &MedalSpec, transform: Transform) -> impl Bundle {
     let (radius, thickness) = (spec.radius.get(), spec.thickness.get());
     (
-        MedalKind(medal),
+        MedalKind(medal.clone()),
         Appearance::new(
             Appearance::medal_key(medal),
             Silhouette::Cylinder { radius, height: thickness },
@@ -190,13 +191,13 @@ pub fn spawn_initial_medals(commands: &mut Commands, stage: &Stage, spec: &Medal
         .iter()
         .flat_map(|placement| placement.positions())
     {
-        commands.spawn(medal_bundle(MedalType::Normal, spec, Transform::from_translation(p)));
+        commands.spawn(medal_bundle(&MedalId::normal(), spec, Transform::from_translation(p)));
     }
 }
 
 pub fn spawn_launched_medal(commands: &mut Commands, plan: &LaunchPlan) {
     commands.spawn((
-        medal_bundle(plan.medal, &plan.spec, Transform::from_translation(plan.origin)),
+        medal_bundle(&plan.medal, &plan.spec, Transform::from_translation(plan.origin)),
         LinearVelocity(plan.velocity),
     ));
 }

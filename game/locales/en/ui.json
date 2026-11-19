@@ -2,12 +2,17 @@
   "title": "NUDRA",
   "choose_pusher": "Choose your Pusher",
   "character_entry": "{{index}}  {{name}}",
-  "hud": "WAVE {{wave}}\nENEMIES {{enemies}}\nDEFEATED {{defeated}}\nLV {{level}}",
-  "controls": "A/D or ←/→: aim\nSpace / click / tap: launch",
+  "hud": "WAVE {{wave}}/4\nENEMIES {{enemies}}\nDEFEATED {{defeated}}\nLV {{level}}\nEVOLUTION {{gauge}}%",
+  "controls": "A/D or ←/→: aim\nHold Space / click / tap: launch\nF: auto fire on/off · Tab: medal",
   "game_over": "GAME OVER",
   "defeated": "Defeated {{defeated}}",
   "best_record": "Best {{best}}",
   "new_record": "NEW RECORD!  Best {{best}}",
   "play_time": "Time {{time}}",
-  "continue": "Click or press Enter"
+  "continue": "Click or press Enter",
+  "victory": "VICTORY",
+  "evolve": "Choose an evolution",
+  "level_up": "Level up",
+  "fuse": "Fuse",
+  "new_medal": "New!"
 }

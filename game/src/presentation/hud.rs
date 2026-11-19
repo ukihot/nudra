@@ -49,6 +49,7 @@ fn hud_text(hud: &HudModel, score: &Score) -> I18nText {
         (Arg::Enemies, hud.alive_enemies.to_string()),
         (Arg::Defeated, score.defeated.to_string()),
         (Arg::Level, hud.level.to_string()),
+        (Arg::Gauge, hud.evolution_percent.to_string()),
     ])
 }
 
@@ -95,10 +96,16 @@ fn refresh_hud(
 fn spawn_result(mut commands: Commands, result: Option<Res<GameResult>>, score: Res<Score>) {
     // GameResult はリザルトへ移る前に必ず登録される。無い場合は今回の撃破数だけを出す
     let (best, new_record, play_time) = match result.as_deref() {
-        Some(GameResult::Lost { best_defeated, new_record, play_time, .. }) => {
-            (*best_defeated, *new_record, PlayTime(*play_time).to_string())
-        },
+        Some(
+            GameResult::Lost { best_defeated, new_record, play_time, .. }
+            | GameResult::Won { best_defeated, new_record, play_time, .. },
+        ) => (*best_defeated, *new_record, PlayTime(*play_time).to_string()),
         None => (score.defeated, false, String::new()),
+    };
+    let title = if matches!(result.as_deref(), Some(GameResult::Won { .. })) {
+        Ui::Victory
+    } else {
+        Ui::GameOver
     };
     let record = if new_record {
         Ui::NewRecord
@@ -119,7 +126,7 @@ fn spawn_result(mut commands: Commands, result: Option<Res<GameResult>>, score: 
             },
             BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.6)),
             children![
-                label(Ui::GameOver.text(), 64.0, Color::srgb(0.9, 0.3, 0.25)),
+                label(title.text(), 64.0, Color::srgb(0.9, 0.65, 0.25)),
                 label(
                     Ui::Defeated.with([(Arg::Defeated, score.defeated.to_string())]),
                     28.0,

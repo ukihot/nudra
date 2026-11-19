@@ -122,7 +122,7 @@ fn placeholders(text: &str) -> BTreeSet<String> {
         .collect()
 }
 
-fn text<'a>(catalog: &'a serde_json::Map<String, serde_json::Value>, ui: Ui) -> &'a str {
+fn text(catalog: &serde_json::Map<String, serde_json::Value>, ui: Ui) -> &str {
     catalog[ui.key()]
         .as_str()
         .unwrap_or_else(|| panic!("{} must be a string", ui.key()))
@@ -170,4 +170,33 @@ fn placeholder_extraction_finds_every_name() {
         BTreeSet::from(["wave".into(), "waves".into()])
     );
     assert!(placeholders("no args").is_empty());
+}
+
+#[test]
+fn every_defined_medal_has_a_name_in_every_locale() {
+    let specs: game::infrastructure::data::SpecsAsset =
+        ron::from_str(include_str!("../assets/data/game.specs.ron")).expect("valid specs");
+    // メダル名カタログは全定義IDと一致し、属性名をUI側に直書きしない。
+    let catalog = specs.to_domain().expect("valid catalog");
+    let en: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_str(include_str!("../locales/en/medals.json")).expect("en medals");
+    let ja: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_str(include_str!("../locales/ja/medals.json")).expect("ja medals");
+    assert_eq!(en.keys().collect::<BTreeSet<_>>(), ja.keys().collect::<BTreeSet<_>>());
+    assert_eq!(
+        en.keys().map(String::as_str).collect::<BTreeSet<_>>(),
+        catalog
+            .medals()
+            .map(|m| m.as_str())
+            .collect::<BTreeSet<_>>()
+    );
+    assert!(
+        en.values()
+            .chain(ja.values())
+            .all(|v| v.as_str().is_some_and(|s| !s.is_empty()))
+    );
+    assert_eq!(ja["sauna"], "サウナ");
+    assert_eq!(ja["spicy_food"], "激辛");
+    assert_eq!(ja["wish"], "願い");
+    assert_eq!(ja["chainsaw"], "チェーンソー");
 }

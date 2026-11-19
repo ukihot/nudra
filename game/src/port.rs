@@ -13,9 +13,8 @@ use std::{borrow::Cow, time::Duration};
 use bevy::prelude::*;
 use domain::{
     event::DomainEvent,
-    id::{EnemyId, EnemyTypeId, GoalId, PusherCharacterId},
-    session::Upgrade,
-    spec::{MedalType, SpecialKind},
+    evolution::Evolution,
+    id::{EnemyId, EnemyTypeId, GoalId, MedalId, PusherCharacterId},
 };
 
 // ── 入力: 意図 ────────────────────────────────────────────
@@ -28,6 +27,7 @@ pub struct ControlIntent {
     pub aim: f32,
     /// 発射ボタンが押されている
     pub fire: bool,
+    pub auto_fire: bool,
 }
 
 // ── 入力: 指図 ────────────────────────────────────────────
@@ -35,9 +35,11 @@ pub struct ControlIntent {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Request {
     /// キャラクターを選んでインゲームを開始する
-    Start { character: PusherCharacterId },
-    /// 【仮】成長の選択方式は未確定。開発用の操作から送る
-    LevelUp(Upgrade),
+    Start {
+        character: PusherCharacterId,
+    },
+    Evolve(Evolution),
+    SelectMedal(MedalId),
     /// リザルトからキャラクター選択へ戻る
     Menu,
 }
@@ -98,6 +100,24 @@ pub struct HudModel {
     pub wave: usize,
     pub alive_enemies: usize,
     pub level: u32,
+    pub evolution_percent: u32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct EvolutionChoice {
+    pub evolution: Evolution,
+    pub result: MedalId,
+    pub enabled: bool,
+}
+
+/// 進化画面の提示内容。New! の候補はDomainで確定済み。
+#[derive(Resource, Debug, Clone, Default, PartialEq)]
+pub struct EvolutionModel(pub Vec<EvolutionChoice>);
+
+#[derive(Resource, Debug, Clone, Default, PartialEq)]
+pub struct MedalModel {
+    pub owned: Vec<MedalId>,
+    pub selected: Option<MedalId>,
 }
 
 /// 照準表示用の値。
@@ -110,6 +130,12 @@ pub struct AimModel {
 /// 直近のゲーム結果。
 #[derive(Resource, Debug, Clone, Copy, PartialEq)]
 pub enum GameResult {
+    Won {
+        defeated: u32,
+        best_defeated: u32,
+        new_record: bool,
+        play_time: Duration,
+    },
     Lost {
         enemy: EnemyId,
         goal: GoalId,
@@ -165,18 +191,8 @@ impl Appearance {
         Self { key: key.into(), silhouette }
     }
 
-    pub fn medal_key(medal: MedalType) -> &'static str {
-        match medal {
-            MedalType::Normal => "medal/normal",
-            MedalType::Special(kind) => match kind {
-                SpecialKind::Fire => "medal/fire",
-                SpecialKind::Ice => "medal/ice",
-                SpecialKind::Explosion => "medal/explosion",
-                SpecialKind::Heavy => "medal/heavy",
-                SpecialKind::Magnet => "medal/magnet",
-                SpecialKind::Bounce => "medal/bounce",
-            },
-        }
+    pub fn medal_key(medal: &MedalId) -> String {
+        format!("medal/{medal}")
     }
 
     pub fn enemy_key(kind: &EnemyTypeId) -> String {
@@ -195,5 +211,7 @@ pub(crate) fn plugin(app: &mut App) {
         .init_resource::<ControlIntent>()
         .init_resource::<CharacterRoster>()
         .init_resource::<HudModel>()
+        .init_resource::<EvolutionModel>()
+        .init_resource::<MedalModel>()
         .init_resource::<AimModel>();
 }

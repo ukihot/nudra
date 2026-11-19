@@ -1,18 +1,27 @@
 //! applicationのテスト用フィクスチャとモック。
 
-use std::collections::HashMap;
+use std::{
+    collections::{BTreeMap, HashMap},
+    num::NonZeroU32,
+};
 
 use domain::{
-    id::{BridgeId, EnemyTypeId, GameSessionId, GoalId, PusherCharacterId, RailId, StageId},
+    difficulty::Difficulty,
+    id::{
+        BridgeId, EnemyTypeId, GameSessionId, GoalId, MedalId, PusherCharacterId, RailId, StageId,
+    },
     math::Vec3,
     positive::Positive,
     pusher::{MovementPattern, PusherCharacter, PusherStats},
     repository::{PusherCharacterRepository, StageRepository},
     session::GameSession,
-    spec::{EnemySpec, MedalSpec, MedalType, SpecCatalog},
+    spec::{
+        EnemySpec, EvolutionRules, MedalDef, MedalLevels, MedalSpec, MedalTier, SpecCatalog,
+        SpecParts,
+    },
     stage::{
-        Abyss, Bridge, Catapult, Geometry, Goal, InitialMedalPlacement, Rail, Shape, SpawnEntry,
-        Stage, StageParts, Wave, WavePlan,
+        Abyss, Bridge, Catapult, CatapultParts, Geometry, Goal, InitialMedalPlacement, Rail, Shape,
+        SpawnEntry, Stage, StageParts, Wave, WavePlan,
     },
     time::Ticks,
 };
@@ -32,6 +41,16 @@ mockall::mock! {
     }
 }
 
+pub fn fire() -> MedalId {
+    MedalId::new("fire")
+}
+pub fn water() -> MedalId {
+    MedalId::new("water")
+}
+pub fn sauna() -> MedalId {
+    MedalId::new("sauna")
+}
+
 pub fn spawn(at_tick: u64) -> SpawnEntry {
     SpawnEntry {
         at: Ticks(at_tick),
@@ -41,6 +60,8 @@ pub fn spawn(at_tick: u64) -> SpawnEntry {
     }
 }
 
+/// 4Wave: 第1Waveは通常2体（Tick 0,
+/// 60）と中ボス（120）、第2・3Waveは中ボスのみ、第4Waveは最終ボス。
 #[fixture]
 pub fn stage() -> Stage {
     Stage::new(StageParts {
@@ -49,8 +70,16 @@ pub fn stage() -> Stage {
             shape: Shape::Rectangle { width: p(10.0), depth: p(10.0) },
             floor_y: 0.0,
         },
-        catapult: Catapult::new(Vec3::new(0.0, 1.0, 5.0), 0.0, (-0.5, 0.5), 0.2, 10.0, Ticks(12))
-            .expect("valid catapult"),
+        catapult: Catapult::new(CatapultParts {
+            position: Vec3::new(0.0, 1.0, 5.0),
+            base_yaw: 0.0,
+            yaw_range: (-0.5, 0.5),
+            initial_yaw: 0.0,
+            pitch: 0.2,
+            speed: 10.0,
+            fire_interval: Ticks(12),
+        })
+        .expect("valid catapult"),
         bridges: vec![Bridge {
             id: BridgeId(1),
             entry: Vec3::X * 10.0,
@@ -69,9 +98,15 @@ pub fn stage() -> Stage {
             id: GoalId(1),
             position: Vec3::new(0.0, 0.0, -4.0),
             radius: p(1.0),
+            available_from: Difficulty::EASY,
         }],
         initial_medals: vec![InitialMedalPlacement::grid(Vec3::ZERO, 2, 2, 1, Vec3::ONE)],
-        wave_plan: WavePlan::new(vec![Wave::new(vec![spawn(0), spawn(60)])]),
+        wave_plan: WavePlan::new(vec![
+            Wave::new(vec![spawn(0), spawn(60)], spawn(120)),
+            Wave::new(vec![], spawn(0)),
+            Wave::new(vec![], spawn(0)),
+            Wave::boss_only(spawn(0)),
+        ]),
     })
     .expect("valid stage")
 }
@@ -91,6 +126,7 @@ pub fn character() -> PusherCharacter {
     }
 }
 
+/// Lv.1 のメダル
 pub fn medal_spec() -> MedalSpec {
     MedalSpec {
         mass: p(1.0),
@@ -101,8 +137,18 @@ pub fn medal_spec() -> MedalSpec {
     }
 }
 
-#[fixture]
-pub fn specs() -> SpecCatalog {
+/// レベルが上がるごとに質量 +1
+pub fn levels() -> MedalLevels {
+    [1.0, 2.0, 3.0, 4.0].map(|mass| MedalSpec { mass: p(mass), ..medal_spec() })
+}
+
+fn def(tier: MedalTier) -> MedalDef {
+    MedalDef { tier, levels: levels() }
+}
+
+/// ノーマル、素材 fire・water、錬成 sauna（fire + water）。ゲージは10で満タン、Easy
+/// は1枚10ポイント。
+pub fn spec_parts() -> SpecParts {
     let enemy = EnemySpec {
         mass: p(2.0),
         radius: p(0.3),
@@ -111,16 +157,38 @@ pub fn specs() -> SpecCatalog {
         walk_force: 10.0,
         friction: 0.5,
     };
-    SpecCatalog::new(
-        HashMap::from([(MedalType::Normal, medal_spec())]),
-        HashMap::from([(EnemyTypeId::new("grunt"), enemy)]),
-    )
-    .expect("valid specs")
+    SpecParts {
+        medals: BTreeMap::from([
+            (MedalId::normal(), def(MedalTier::Normal)),
+            (fire(), def(MedalTier::Element)),
+            (water(), def(MedalTier::Element)),
+            (sauna(), def(MedalTier::Fusion)),
+        ]),
+        enemies: HashMap::from([(EnemyTypeId::new("grunt"), enemy)]),
+        fusions: vec![(fire(), water(), sauna())],
+        evolution: EvolutionRules {
+            threshold: NonZeroU32::new(10).expect("non-zero"),
+            points_per_medal: [10, 5, 2, 1],
+        },
+    }
 }
 
 #[fixture]
-pub fn session(stage: Stage, character: PusherCharacter) -> GameSession {
-    GameSession::start(GameSessionId(1), &stage, &character).0
+pub fn specs() -> SpecCatalog {
+    SpecCatalog::new(spec_parts()).expect("valid specs")
+}
+
+#[fixture]
+pub fn session(stage: Stage, character: PusherCharacter, specs: SpecCatalog) -> GameSession {
+    GameSession::start(
+        GameSessionId(1),
+        &stage,
+        &character,
+        Difficulty::EASY,
+        specs.evolution(),
+        1,
+    )
+    .0
 }
 
 /// テスト用の簡潔な生成。不正値ならパニックする。

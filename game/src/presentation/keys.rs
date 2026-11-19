@@ -29,10 +29,15 @@ pub enum Ui {
     NewRecord,
     PlayTime,
     Continue,
+    Victory,
+    Evolve,
+    LevelUp,
+    Fuse,
+    NewMedal,
 }
 
 impl Ui {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 16] = [
         Self::Title,
         Self::ChoosePusher,
         Self::CharacterEntry,
@@ -44,6 +49,11 @@ impl Ui {
         Self::NewRecord,
         Self::PlayTime,
         Self::Continue,
+        Self::Victory,
+        Self::Evolve,
+        Self::LevelUp,
+        Self::Fuse,
+        Self::NewMedal,
     ];
 
     pub const fn key(self) -> &'static str {
@@ -59,6 +69,11 @@ impl Ui {
             Self::NewRecord => "new_record",
             Self::PlayTime => "play_time",
             Self::Continue => "continue",
+            Self::Victory => "victory",
+            Self::Evolve => "evolve",
+            Self::LevelUp => "level_up",
+            Self::Fuse => "fuse",
+            Self::NewMedal => "new_medal",
         }
     }
 
@@ -87,10 +102,11 @@ pub enum Arg {
     Level,
     Best,
     Time,
+    Gauge,
 }
 
 impl Arg {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::Index,
         Self::Name,
         Self::Wave,
@@ -99,6 +115,7 @@ impl Arg {
         Self::Level,
         Self::Best,
         Self::Time,
+        Self::Gauge,
     ];
 
     pub const fn key(self) -> &'static str {
@@ -111,6 +128,12 @@ impl Arg {
             Self::Level => "level",
             Self::Best => "best",
             Self::Time => "time",
+            Self::Gauge => "gauge",
         }
     }
+}
+
+/// メダルIDは翻訳カタログのキーと共通。
+pub fn medal_name(medal: &domain::id::MedalId) -> I18nText {
+    I18nText::new("medals", medal.as_str())
 }

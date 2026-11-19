@@ -4,7 +4,7 @@
 //! 押しっぱなしでも要求は増えない。 実際に発射するかは Infrastructure が固定ステップで
 //! Domain（クールダウン）に問い合わせて決める。
 
-use bevy::prelude::*;
+use bevy::{picking::hover::Hovered, prelude::*};
 
 use crate::{
     port::{AimModel, ControlIntent},
@@ -22,9 +22,8 @@ pub(super) fn plugin(app: &mut App) {
         Update,
         (write_intent, draw_aim_guide).run_if(in_state(GamePhase::Running)),
     )
+    .add_systems(OnEnter(GamePhase::Evolving), clear_manual_intent)
     .add_systems(OnExit(AppState::InGame), release_intent);
-    #[cfg(debug_assertions)]
-    app.add_systems(Update, debug_level_up.run_if(in_state(GamePhase::Running)));
 }
 
 fn write_intent(
@@ -33,17 +32,30 @@ fn write_intent(
     touches: Res<Touches>,
     time: Res<Time>,
     mut intent: ResMut<ControlIntent>,
+    buttons: Query<&Hovered>,
 ) {
     let pressed = |a, b| keys.pressed(a) || keys.pressed(b);
     // +yaw は左回り（画面左）
     let steer = f32::from(u8::from(pressed(KeyCode::ArrowLeft, KeyCode::KeyA)))
         - f32::from(u8::from(pressed(KeyCode::ArrowRight, KeyCode::KeyD)));
-    let drag: f32 = touches.iter().map(|t| t.delta().x).sum();
+    let over_ui = buttons.iter().any(Hovered::get);
+    let drag: f32 = if over_ui {
+        0.0
+    } else {
+        touches.iter().map(|t| t.delta().x).sum()
+    };
     // 固定ステップが読むまで旋回量を貯める（フレームと固定ステップの回数が一致しなくても失われない）
     intent.aim += steer * AIM_SPEED * time.delta_secs() - drag * TOUCH_AIM_PER_PX;
+    if keys.just_pressed(KeyCode::KeyF) {
+        intent.auto_fire = !intent.auto_fire;
+    }
     intent.fire = keys.pressed(KeyCode::Space)
-        || mouse.pressed(MouseButton::Left)
-        || touches.iter().next().is_some();
+        || (!over_ui && (mouse.pressed(MouseButton::Left) || touches.iter().next().is_some()));
+}
+
+fn clear_manual_intent(mut intent: ResMut<ControlIntent>) {
+    intent.aim = 0.0;
+    intent.fire = false;
 }
 
 fn release_intent(mut intent: ResMut<ControlIntent>) {
@@ -54,31 +66,5 @@ fn draw_aim_guide(aim: Res<AimModel>, mut gizmos: Gizmos) {
     if aim.direction != Vec3::ZERO {
         let tip = aim.origin + aim.direction * AIM_GUIDE_LENGTH;
         gizmos.arrow(aim.origin, tip, Color::srgb(1.0, 0.85, 0.3));
-    }
-}
-
-/// 【仮】成長の選択方式は未確定のため、開発ビルドだけ数字キーで強化の指図を出せるようにする。
-#[cfg(debug_assertions)]
-fn debug_level_up(
-    keys: Res<ButtonInput<KeyCode>>,
-    mut submit: MessageWriter<crate::port::SubmitRequest>,
-) {
-    use domain::{positive::Positive, session::Upgrade, spec::MedalType};
-
-    use crate::port::{Request, SubmitRequest};
-    let choices: [(KeyCode, f32, fn(Positive) -> Upgrade); 3] = [
-        (KeyCode::Digit1, 1.5, |factor| Upgrade::MedalMass {
-            medal: MedalType::Normal,
-            factor,
-        }),
-        (KeyCode::Digit2, 1.25, |factor| Upgrade::PusherSpeed { factor }),
-        (KeyCode::Digit3, 1.5, |factor| Upgrade::PusherForce { factor }),
-    ];
-    for (key, factor, upgrade) in choices {
-        if keys.just_pressed(key)
-            && let Ok(factor) = Positive::new(factor)
-        {
-            submit.write(SubmitRequest(Request::LevelUp(upgrade(factor))));
-        }
     }
 }

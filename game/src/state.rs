@@ -21,6 +21,8 @@ pub enum GamePhase {
     #[default]
     Starting,
     Running,
+    /// 進化を選択中。論理時計と物理を止める
+    Evolving,
     /// 結果の記録・保存をしてリザルトへ移る
     Ending,
 }

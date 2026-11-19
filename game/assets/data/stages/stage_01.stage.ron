@@ -5,10 +5,11 @@
     catapult: (
         position: (0.0, 0.6, 5.8),
         base_yaw_deg: 0.0,
+        initial_yaw_deg: 0.0,
         yaw_range_deg: (-40.0, 40.0),
         pitch_deg: 12.0,
         speed: 14.0,
-        cooldown_ms: 250,
+        fire_interval_ms: 250,
     ),
     bridges: [
         (id: 1, entry: (-2.5, 0.0, -13.0), exit: (-2.5, 0.0, -8.0), width: 1.6),
@@ -27,19 +28,23 @@
         (origin: (0.0, 0.05, -4.2), columns: 12, rows: 7, layers: 3, spacing: (0.6, 0.1, 0.6)),
     ],
     waves: [
-        [
+        (spawns: [
             (at_ms: 1000, enemy: "grunt", bridge: 1, goal: 1),
             (at_ms: 3000, enemy: "grunt", bridge: 2, goal: 1),
             (at_ms: 5000, enemy: "grunt", bridge: 1, goal: 1),
             (at_ms: 7000, enemy: "grunt", bridge: 2, goal: 1),
-        ],
-        [
+        ], boss: (at_ms: 9000, enemy: "brute", bridge: 1, goal: 1)),
+        (spawns: [
             (at_ms: 1000, enemy: "grunt", bridge: 1, goal: 1),
             (at_ms: 1500, enemy: "grunt", bridge: 2, goal: 1),
-            (at_ms: 2500, enemy: "brute", bridge: 1, goal: 1),
             (at_ms: 3500, enemy: "grunt", bridge: 2, goal: 1),
             (at_ms: 4000, enemy: "grunt", bridge: 1, goal: 1),
-            (at_ms: 5000, enemy: "grunt", bridge: 2, goal: 1),
-        ],
+        ], boss: (at_ms: 6000, enemy: "brute", bridge: 2, goal: 1)),
+        (spawns: [
+            (at_ms: 1000, enemy: "grunt", bridge: 1, goal: 1),
+            (at_ms: 1500, enemy: "grunt", bridge: 2, goal: 1),
+            (at_ms: 2500, enemy: "grunt", bridge: 1, goal: 1),
+        ], boss: (at_ms: 5000, enemy: "brute", bridge: 1, goal: 1)),
+        (spawns: [], boss: (at_ms: 1000, enemy: "boss", bridge: 2, goal: 1)),
     ],
 )

@@ -83,6 +83,10 @@ fn app_with_save_dir(dir: tempfile::TempDir) -> App {
         .add_plugins(game::core_plugin)
         .init_resource::<Recorded>()
         .add_systems(Last, record);
+    // App::run と同じく Plugin の finish / cleanup を呼ぶ（Avian などが finish で Resource
+    // を登録する）
+    app.finish();
+    app.cleanup();
     // 1回の update でちょうど1回の固定ステップ（=1Tick）を進める
     let step = app.world().resource::<Time<Fixed>>().timestep();
     app.insert_resource(TimeUpdateStrategy::ManualDuration(step));
@@ -287,17 +291,290 @@ fn level_up_request_completes_and_updates_medal_mass() {
     let mut app = started();
     app.update();
     let before = mass(&mut app);
-    let factor = domain::positive::Positive::new(2.0).expect("positive");
-    let medal = domain::spec::MedalType::Normal;
+    app.world_mut()
+        .resource_mut::<PendingFacts>()
+        .0
+        .push(PhysicsFact::MedalsFell(25));
+    run_until(&mut app, 5, |a| phase(a) == Some(GamePhase::Evolving));
+    let medal = domain::id::MedalId::normal();
     submit(
         &mut app,
-        Request::LevelUp(domain::session::Upgrade::MedalMass { medal, factor }),
+        Request::Evolve(domain::evolution::Evolution::LevelUp(medal)),
     );
     run_until(&mut app, 5, |a| recorded(a).outcomes.len() == 2);
 
     assert_eq!(recorded(&app).outcomes[1].status, RequestStatus::Completed);
     let after = mass(&mut app);
     assert!((after - before * 2.0).abs() < 1e-3, "{before} -> {after}");
+}
+
+fn enter_evolution(app: &mut App) {
+    app.world_mut()
+        .resource_mut::<PendingFacts>()
+        .0
+        .push(PhysicsFact::MedalsFell(25));
+    run_until(app, 5, |a| phase(a) == Some(GamePhase::Evolving));
+}
+
+#[test]
+fn evolution_freezes_clock_physics_and_firing_until_a_valid_choice() {
+    let mut app = started();
+    set_fire(&mut app, true);
+    let launches_before = launches(&app);
+    enter_evolution(&mut app);
+    let tick = now(&app);
+    let positions = |app: &mut App| {
+        app.world_mut()
+            .query::<(Entity, &Position)>()
+            .iter(app.world())
+            .map(|(e, p)| (e, p.0))
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    let before = positions(&mut app);
+    let offer = app
+        .world()
+        .resource::<ActiveGame>()
+        .session
+        .evolution_offer()
+        .cloned();
+    for _ in 0..15 {
+        app.update();
+    }
+    assert_eq!(now(&app), tick);
+    assert_eq!(positions(&mut app), before);
+    assert_eq!(launches(&app), launches_before, "no extra shot in the resolve tick");
+
+    submit(
+        &mut app,
+        Request::Evolve(domain::evolution::Evolution::Acquire(domain::id::MedalId::new(
+            "unknown",
+        ))),
+    );
+    run_until(&mut app, 5, |a| recorded(a).outcomes.len() == 2);
+    assert!(matches!(
+        recorded(&app).outcomes[1].status,
+        RequestStatus::Rejected(RejectReason::Invalid(_))
+    ));
+    assert_eq!(phase(&app), Some(GamePhase::Evolving));
+    assert_eq!(now(&app), tick);
+    assert_eq!(
+        app.world()
+            .resource::<ActiveGame>()
+            .session
+            .evolution_offer(),
+        offer.as_ref()
+    );
+
+    let action = || {
+        Request::Evolve(domain::evolution::Evolution::Acquire(
+            offer.clone().expect("new medal"),
+        ))
+    };
+    submit(&mut app, action());
+    submit(&mut app, action());
+    run_until(&mut app, 5, |a| phase(a) == Some(GamePhase::Running));
+    assert_eq!(
+        recorded(&app)
+            .outcomes
+            .iter()
+            .filter(|o| o.status == RequestStatus::Completed)
+            .count(),
+        2,
+        "start and one evolution"
+    );
+    assert!(
+        recorded(&app)
+            .outcomes
+            .iter()
+            .any(|o| o.status == RequestStatus::Rejected(RejectReason::Duplicate))
+    );
+    assert!(!app.world().resource::<Time<Physics>>().is_paused());
+    assert!(now(&app) > tick);
+}
+
+#[rstest::rstest]
+#[case::abyss(-10.0)]
+#[case::safety_plane(-31.0)]
+fn an_actual_medal_fall_is_counted_once(#[case] depth: f32) {
+    let mut app = started();
+    let medal = app
+        .world_mut()
+        .query_filtered::<Entity, With<MedalKind>>()
+        .iter(app.world())
+        .next()
+        .expect("medal");
+    teleport(&mut app, medal, Vec3::new(0.0, depth, 0.0));
+    run_until(&mut app, 5, |a| a.world().get_entity(medal).is_err());
+    assert_eq!(
+        app.world()
+            .resource::<ActiveGame>()
+            .session
+            .gauge()
+            .ratio(),
+        0.04
+    );
+}
+
+#[test]
+fn duplicate_sensor_results_and_safety_plane_count_the_same_medal_once() {
+    let mut app = started();
+    let medal = app
+        .world_mut()
+        .query_filtered::<Entity, With<MedalKind>>()
+        .iter(app.world())
+        .next()
+        .expect("medal");
+    let abyss = app
+        .world_mut()
+        .query_filtered::<Entity, With<game::infrastructure::world::AbyssZone>>()
+        .iter(app.world())
+        .next()
+        .expect("abyss");
+    teleport(&mut app, medal, Vec3::new(0.0, -31.0, 0.0));
+    for _ in 0..2 {
+        app.world_mut().write_message(CollisionStart {
+            collider1: abyss,
+            collider2: medal,
+            body1: Some(abyss),
+            body2: Some(medal),
+        });
+    }
+    app.update();
+    assert_eq!(
+        app.world()
+            .resource::<ActiveGame>()
+            .session
+            .gauge()
+            .ratio(),
+        0.04
+    );
+}
+
+#[test]
+fn fusion_consumes_owned_materials_and_resets_the_selected_medal() {
+    use domain::{evolution::Evolution, id::MedalId};
+    let mut app = started();
+    let m = |id: &str| MedalId::new(id);
+    let owns = |app: &App, id: &str| {
+        app.world()
+            .resource::<ActiveGame>()
+            .session
+            .medals()
+            .level(&m(id))
+            .is_some()
+    };
+    let choose = |app: &mut App, evolution| {
+        submit(app, Request::Evolve(evolution));
+        run_until(app, 5, |a| phase(a) == Some(GamePhase::Running));
+        assert_eq!(
+            recorded(app).outcomes.last().expect("outcome").status,
+            RequestStatus::Completed
+        );
+    };
+    // New! は未所持の素材から選ぶため、最大16回で両素材が揃う。
+    for _ in 0..16 {
+        if owns(&app, "fire") && owns(&app, "water") {
+            break;
+        }
+        enter_evolution(&mut app);
+        let offered = app
+            .world()
+            .resource::<ActiveGame>()
+            .session
+            .evolution_offer()
+            .cloned()
+            .expect("offered");
+        choose(&mut app, Evolution::Acquire(offered));
+    }
+    for id in ["fire", "water"] {
+        for _ in 0..3 {
+            enter_evolution(&mut app);
+            choose(&mut app, Evolution::LevelUp(m(id)));
+        }
+    }
+    submit(&mut app, Request::SelectMedal(m("fire")));
+    run_until(&mut app, 5, |a| {
+        a.world().resource::<ActiveGame>().catapult.selected() == &m("fire")
+    });
+    set_fire(&mut app, true);
+    app.update();
+    set_fire(&mut app, false);
+    let fire_medals = |app: &mut App| {
+        app.world_mut()
+            .query::<&MedalKind>()
+            .iter(app.world())
+            .filter(|kind| kind.0 == m("fire"))
+            .count()
+    };
+    assert_eq!(fire_medals(&mut app), 1);
+    enter_evolution(&mut app);
+    choose(&mut app, Evolution::Fuse(m("fire"), m("water")));
+    assert!(!owns(&app, "fire") && !owns(&app, "water"));
+    assert!(owns(&app, "sauna"));
+    assert_eq!(fire_medals(&mut app), 1, "existing physical medals stay on the board");
+    assert_eq!(
+        app.world()
+            .resource::<ActiveGame>()
+            .catapult
+            .selected(),
+        &MedalId::normal()
+    );
+    submit(&mut app, Request::SelectMedal(m("fire")));
+    let outcomes = recorded(&app).outcomes.len();
+    run_until(&mut app, 5, |a| recorded(a).outcomes.len() > outcomes);
+    assert!(matches!(
+        recorded(&app).outcomes.last().expect("outcome").status,
+        RequestStatus::Rejected(RejectReason::Invalid(_))
+    ));
+}
+
+#[test]
+fn final_boss_defeat_wins_and_records_the_result() {
+    let mut app = started();
+    for wave in 0..4 {
+        // 既存の通常敵を残したまま、Waveの全出現時刻をDomainへ進める。
+        let boss = {
+            let mut game = app.world_mut().resource_mut::<ActiveGame>();
+            let ActiveGame { session, stage, .. } = &mut *game;
+            let at = Tick((wave + 1) * 10_000);
+            let first = session.advance(stage, at);
+            let second = session.advance(stage, Tick(at.0 + 10_000));
+            first
+                .into_iter()
+                .chain(second)
+                .last()
+                .expect("boss order")
+                .enemy
+        };
+        app.world_mut()
+            .resource_mut::<PendingFacts>()
+            .0
+            .push(PhysicsFact::EnemyEnteredAbyss(boss));
+        app.update();
+    }
+    run_until(&mut app, 10, |a| app_state(a) == AppState::Result);
+    assert!(matches!(
+        app.world().get_resource::<GameResult>(),
+        Some(GameResult::Won { defeated: 4, .. })
+    ));
+    assert_eq!(
+        recorded(&app)
+            .events
+            .iter()
+            .filter(|e| matches!(e, DomainEvent::GameWon))
+            .count(),
+        1
+    );
+    run_until(&mut app, 500, save_settled);
+    let progress = saved(&app);
+    assert_eq!(progress.games_played(), 1);
+    assert_eq!(
+        progress
+            .record(&domain::id::StageId::new("stage_01"))
+            .expect("record")
+            .best_defeated(),
+        4
+    );
 }
 
 // ── 論理時刻 ──
@@ -527,10 +804,11 @@ fn soak_random_play_has_no_runtime_errors() {
             submitted += 1;
         }
         if roll % 131 == 0 {
-            let factor = domain::positive::Positive::new(1.1).expect("positive");
             submit(
                 &mut app,
-                Request::LevelUp(domain::session::Upgrade::PusherSpeed { factor }),
+                Request::Evolve(domain::evolution::Evolution::LevelUp(
+                    domain::id::MedalId::normal(),
+                )),
             );
             submitted += 1;
         }

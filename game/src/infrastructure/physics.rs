@@ -1,5 +1,10 @@
 //! Avian との接続（基本設計 5.4）。Avianへの依存はこのファイルと world.rs に閉じ込める。
 
+use std::{
+    collections::HashSet,
+    sync::atomic::{AtomicU32, Ordering},
+};
+
 use application::PhysicsFact;
 use avian3d::{dynamics::rigid_body::forces::ForcesItem, prelude::*};
 use bevy::prelude::*;
@@ -56,7 +61,7 @@ const PUSHER_MAX_LEAD: f32 = 0.6;
 // ── 物理結果の収集 ────────────────────────────────────────
 
 /// センサーの接触開始と安全高度から、ゲーム判定に必要な事実を集める。
-/// 奈落に落ちたメダルはDomainへ渡さず、その場で除去する（基本設計 5.4）。
+/// メダルの落下をEntityごとに重複排除し、tick単位の枚数として渡す（基本設計 3.12）。
 #[allow(clippy::too_many_arguments)]
 pub fn collect_facts(
     mut collisions: MessageReader<CollisionStart>,
@@ -70,6 +75,7 @@ pub fn collect_facts(
     mut commands: Commands,
     par_commands: ParallelCommands,
 ) {
+    let mut fallen = HashSet::new();
     for c in collisions.read() {
         for (zone, other) in [(c.collider1, c.collider2), (c.collider2, c.collider1)] {
             let Ok((is_abyss, goal)) = zones.get(zone) else {
@@ -84,7 +90,7 @@ pub fn collect_facts(
                     None => {},
                 }
             } else if is_abyss && medals.contains(other) {
-                commands.entity(other).try_despawn();
+                fallen.insert(other);
             }
         }
     }
@@ -97,13 +103,24 @@ pub fn collect_facts(
     // メダルは数千枚になり得るため並列に調べる（共有の可変状態を持たず、除去は ParallelCommands
     // で）
     let kill_y = kill_y.0;
+    let safety_count = AtomicU32::new(0);
     fallen_medals
         .par_iter()
         .for_each(|(entity, position)| {
-            if position.y < kill_y {
+            if position.y < kill_y && !fallen.contains(&entity) {
+                safety_count.fetch_add(1, Ordering::Relaxed);
                 par_commands.command_scope(|mut commands| commands.entity(entity).try_despawn());
             }
         });
+    let count = u32::try_from(fallen.len())
+        .unwrap_or(u32::MAX)
+        .saturating_add(safety_count.into_inner());
+    for entity in fallen {
+        commands.entity(entity).try_despawn();
+    }
+    if count > 0 {
+        facts.0.push(PhysicsFact::MedalsFell(count));
+    }
 }
 
 /// これより下に落ちた物体を除去する高さ。

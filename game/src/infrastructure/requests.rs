@@ -14,7 +14,8 @@ pub const TTL_FRAMES: u32 = 60;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RequestKind {
     Start,
-    LevelUp,
+    Evolve,
+    SelectMedal,
     Menu,
 }
 
@@ -22,7 +23,8 @@ impl RequestKind {
     pub fn of(request: &Request) -> Self {
         match request {
             Request::Start { .. } => Self::Start,
-            Request::LevelUp(_) => Self::LevelUp,
+            Request::Evolve(_) => Self::Evolve,
+            Request::SelectMedal(_) => Self::SelectMedal,
             Request::Menu => Self::Menu,
         }
     }
@@ -212,15 +214,21 @@ mod tests {
     }
 
     fn kind(n: u8) -> RequestKind {
-        [RequestKind::Start, RequestKind::LevelUp, RequestKind::Menu][usize::from(n % 3)]
+        [
+            RequestKind::Start,
+            RequestKind::Evolve,
+            RequestKind::Menu,
+            RequestKind::SelectMedal,
+        ][usize::from(n % 4)]
     }
 
     fn request(n: u8) -> Request {
         match kind(n) {
             RequestKind::Start => start("a"),
-            RequestKind::LevelUp => Request::LevelUp(domain::session::Upgrade::PusherSpeed {
-                factor: domain::positive::Positive::new(2.0).expect("positive"),
-            }),
+            RequestKind::Evolve => Request::Evolve(domain::evolution::Evolution::LevelUp(
+                domain::id::MedalId::normal(),
+            )),
+            RequestKind::SelectMedal => Request::SelectMedal(domain::id::MedalId::normal()),
             RequestKind::Menu => Request::Menu,
         }
     }

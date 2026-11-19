@@ -8,13 +8,16 @@ mod wave;
 
 use std::collections::HashSet;
 
-pub use catapult::Catapult;
+#[cfg(test)]
+pub(crate) use catapult::fixture as catapult_fixture;
+pub use catapult::{Catapult, CatapultParts};
 pub use error::StageError;
 pub use placement::InitialMedalPlacement;
 pub use rail::Rail;
 pub use wave::{SpawnEntry, Wave, WavePlan};
 
 use crate::{
+    difficulty::Difficulty,
     id::{BridgeId, GoalId, RailId, StageId},
     math::Vec3,
     positive::Positive,
@@ -96,6 +99,8 @@ pub struct Goal {
     pub id: GoalId,
     pub position: Vec3,
     pub radius: Positive,
+    /// この難易度以上で有効になる（Easy で有効なGoalはちょうど1つ、基本設計 3.12）
+    pub available_from: Difficulty,
 }
 
 /// `Stage::new`に渡す組み立て用の値。
@@ -122,6 +127,14 @@ impl Stage {
         if parts.goals.is_empty() {
             return Err(StageError::NoGoal);
         }
+        let easy_goals = parts
+            .goals
+            .iter()
+            .filter(|g| g.available_from == Difficulty::EASY)
+            .count();
+        if easy_goals != 1 {
+            return Err(StageError::EasyGoalCount(easy_goals));
+        }
         if parts.bridges.is_empty() {
             return Err(StageError::NoBridge);
         }
@@ -141,7 +154,17 @@ impl Stage {
         ensure_unique("bridge", parts.bridges.iter().map(|b| b.id.0))?;
         ensure_unique("rail", parts.rails.iter().map(|r| r.id().0))?;
         // S6（Railの形状）は Rail::new で保証済み。S8 は Catapult::new で保証済み。
-        for spawn in parts.wave_plan.waves().iter().flat_map(Wave::spawns) {
+        let waves = parts.wave_plan.waves();
+        if waves.len() != WavePlan::WAVES {
+            return Err(StageError::WaveCount(waves.len()));
+        }
+        if waves
+            .last()
+            .is_some_and(|last| !last.spawns().is_empty())
+        {
+            return Err(StageError::FinalWaveHasRegulars);
+        }
+        for spawn in waves.iter().flat_map(Wave::entries) {
             if !parts.bridges.iter().any(|b| b.id == spawn.bridge) {
                 return Err(StageError::UnknownReference { kind: "bridge", id: spawn.bridge.0 });
             }
@@ -182,6 +205,14 @@ impl Stage {
     pub fn bridge(&self, id: BridgeId) -> Option<&Bridge> {
         self.0.bridges.iter().find(|b| b.id == id)
     }
+    /// 選んだ難易度で有効なGoal。
+    pub fn active_goals(&self, difficulty: Difficulty) -> impl Iterator<Item = &Goal> {
+        self.0
+            .goals
+            .iter()
+            .filter(move |g| g.available_from <= difficulty)
+    }
+
     pub fn goal(&self, id: GoalId) -> Option<&Goal> {
         self.0.goals.iter().find(|g| g.id == id)
     }
@@ -213,15 +244,8 @@ pub(crate) mod fixture {
                 shape: Shape::Rectangle { width: p(10.0), depth: p(10.0) },
                 floor_y: 0.0,
             },
-            catapult: Catapult::new(
-                Vec3::new(0.0, 1.0, 5.0),
-                0.0,
-                (-0.5, 0.5),
-                0.2,
-                10.0,
-                Ticks(12),
-            )
-            .expect("valid catapult"),
+            catapult: Catapult::new(super::catapult::fixture::catapult_parts())
+                .expect("valid catapult"),
             bridges: vec![Bridge {
                 id: BridgeId(1),
                 entry: Vec3::new(10.0, 0.0, 0.0),
@@ -239,15 +263,34 @@ pub(crate) mod fixture {
                 id: GoalId(1),
                 position: Vec3::new(0.0, 0.0, -4.0),
                 radius: p(1.0),
+                available_from: Difficulty::EASY,
             }],
             initial_medals: vec![InitialMedalPlacement::grid(Vec3::ZERO, 2, 2, 1, Vec3::ONE)],
-            wave_plan: WavePlan::new(vec![Wave::new(vec![spawn(0, 1, 1), spawn(60, 1, 1)])]),
+            wave_plan: wave_plan(),
         }
     }
 
     #[fixture]
     pub fn stage(parts: StageParts) -> Stage {
         Stage::new(parts).expect("valid stage")
+    }
+
+    /// 4Wave: 第1Waveは通常2体（Tick 0,
+    /// 60）と中ボス（120）、第2・3Waveは通常1体と中ボス（30）、第4Waveは最終ボス。
+    pub fn wave_plan() -> WavePlan {
+        WavePlan::new(vec![
+            Wave::new(vec![spawn(0, 1, 1), spawn(60, 1, 1)], spawn(120, 1, 1)),
+            Wave::new(vec![spawn(0, 1, 1)], spawn(30, 1, 1)),
+            Wave::new(vec![spawn(0, 1, 1)], spawn(30, 1, 1)),
+            Wave::boss_only(spawn(0, 1, 1)),
+        ])
+    }
+
+    /// 第1Waveだけを差し替えた計画。
+    pub fn waves_with_first(first: Wave) -> WavePlan {
+        let mut waves = wave_plan().waves().to_vec();
+        waves[0] = first;
+        WavePlan::new(waves)
     }
 
     pub fn spawn(at_tick: u64, bridge: u16, goal: u16) -> SpawnEntry {
@@ -265,7 +308,7 @@ mod tests {
     use rstest::rstest;
 
     use super::{
-        fixture::{parts, spawn},
+        fixture::{parts, spawn, wave_plan, waves_with_first},
         *,
     };
     use crate::positive::fixture::p;
@@ -280,6 +323,14 @@ mod tests {
 
     #[rstest]
     #[case::no_goal(|p: &mut StageParts| p.goals.clear(), StageError::NoGoal)]
+    #[case::no_easy_goal(
+        |p: &mut StageParts| p.goals[0].available_from = Difficulty::HARDEST,
+        StageError::EasyGoalCount(0)
+    )]
+    #[case::two_easy_goals(
+        |p: &mut StageParts| p.goals.push(Goal { id: GoalId(2), ..p.goals[0].clone() }),
+        StageError::EasyGoalCount(2)
+    )]
     #[case::no_bridge(|p: &mut StageParts| p.bridges.clear(), StageError::NoBridge)]
     #[case::no_rail(|p: &mut StageParts| p.rails.clear(), StageError::NoRail)]
     #[case::no_medals(|p: &mut StageParts| p.initial_medals.clear(), StageError::NoInitialMedals)]
@@ -287,16 +338,39 @@ mod tests {
         |p: &mut StageParts| p.initial_medals = vec![InitialMedalPlacement::grid(Vec3::ZERO, 0, 3, 1, Vec3::ONE)],
         StageError::NoInitialMedals
     )]
-    #[case::duplicate_goal(|p: &mut StageParts| p.goals.push(p.goals[0].clone()), StageError::DuplicateId { kind: "goal", id: 1 })]
+    #[case::duplicate_goal(
+        |p: &mut StageParts| p.goals.push(Goal { available_from: Difficulty::HARDEST, ..p.goals[0].clone() }),
+        StageError::DuplicateId { kind: "goal", id: 1 }
+    )]
     #[case::duplicate_bridge(|p: &mut StageParts| p.bridges.push(p.bridges[0].clone()), StageError::DuplicateId { kind: "bridge", id: 1 })]
     #[case::duplicate_rail(|p: &mut StageParts| p.rails.push(p.rails[0].clone()), StageError::DuplicateId { kind: "rail", id: 1 })]
     #[case::unknown_bridge(
-        |p: &mut StageParts| p.wave_plan = WavePlan::new(vec![Wave::new(vec![spawn(0, 9, 1)])]),
+        |p: &mut StageParts| p.wave_plan = waves_with_first(Wave::new(vec![spawn(0, 9, 1)], spawn(10, 1, 1))),
         StageError::UnknownReference { kind: "bridge", id: 9 }
     )]
     #[case::unknown_goal(
-        |p: &mut StageParts| p.wave_plan = WavePlan::new(vec![Wave::new(vec![spawn(0, 1, 7)])]),
+        |p: &mut StageParts| p.wave_plan = waves_with_first(Wave::new(vec![spawn(0, 1, 7)], spawn(10, 1, 1))),
         StageError::UnknownReference { kind: "goal", id: 7 }
+    )]
+    #[case::unknown_boss_bridge(
+        |p: &mut StageParts| p.wave_plan = waves_with_first(Wave::new(vec![], spawn(10, 9, 1))),
+        StageError::UnknownReference { kind: "bridge", id: 9 }
+    )]
+    #[case::three_waves(
+        |p: &mut StageParts| p.wave_plan = WavePlan::new(wave_plan().waves()[..3].to_vec()),
+        StageError::WaveCount(3)
+    )]
+    #[case::five_waves(
+        |p: &mut StageParts| p.wave_plan = WavePlan::new([wave_plan().waves(), &wave_plan().waves()[..1]].concat()),
+        StageError::WaveCount(5)
+    )]
+    #[case::final_wave_with_regulars(
+        |p: &mut StageParts| {
+            let mut waves = wave_plan().waves().to_vec();
+            waves[3] = Wave::new(vec![spawn(0, 1, 1)], spawn(0, 1, 1));
+            p.wave_plan = WavePlan::new(waves);
+        },
+        StageError::FinalWaveHasRegulars
     )]
     fn invalid_stage_is_rejected(
         mut parts: StageParts,
@@ -337,5 +411,31 @@ mod tests {
     #[case::infinite(Vec3::ZERO, Vec3::new(f32::INFINITY, 1.0, 1.0))]
     fn degenerate_abyss_is_rejected(#[case] min: Vec3, #[case] max: Vec3) {
         assert!(matches!(Abyss::new(min, max), Err(StageError::InvalidAbyss { .. })));
+    }
+
+    #[rstest]
+    fn harder_difficulties_add_goals(mut parts: StageParts) {
+        let level = |n| Difficulty::new(n).expect("valid");
+        parts.goals.push(Goal {
+            id: GoalId(2),
+            available_from: level(3),
+            ..parts.goals[0].clone()
+        });
+        parts.goals.push(Goal {
+            id: GoalId(3),
+            available_from: level(4),
+            ..parts.goals[0].clone()
+        });
+        let stage = Stage::new(parts).expect("valid");
+        let ids = |d| {
+            stage
+                .active_goals(d)
+                .map(|g| g.id.0)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(Difficulty::EASY), [1]);
+        assert_eq!(ids(level(2)), [1]);
+        assert_eq!(ids(level(3)), [1, 2]);
+        assert_eq!(ids(Difficulty::HARDEST), [1, 2, 3]);
     }
 }

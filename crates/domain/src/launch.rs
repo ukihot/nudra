@@ -4,16 +4,11 @@
 //! 意図がある間は毎tick `fire` を評価し、クールダウンが明けたときだけ発射する。
 //! クールダウン中に発射されないのは却下（エラー）ではなく、まだ条件が成立していないだけ。
 
-use crate::{
-    math::Vec3,
-    spec::{MedalSpec, MedalType},
-    stage::Catapult,
-    time::Tick,
-};
+use crate::{id::MedalId, math::Vec3, spec::MedalSpec, stage::Catapult, time::Tick};
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct LaunchPlan {
-    pub medal: MedalType,
+    pub medal: MedalId,
     pub spec: MedalSpec,
     pub origin: Vec3,
     pub velocity: Vec3,
@@ -22,28 +17,27 @@ pub struct LaunchPlan {
 #[derive(Debug, Clone, PartialEq)]
 pub struct CatapultState {
     yaw: f32,
-    selected: MedalType,
+    selected: MedalId,
     /// 次に発射できるTick（期限）。毎tick残り時間を減らさず、現在のTickと比較する
     next_fire: Tick,
 }
 
-impl Default for CatapultState {
-    fn default() -> Self {
+impl CatapultState {
+    /// ステージの定義（初期の旋回角）から始める。
+    pub fn new(catapult: &Catapult) -> Self {
         Self {
-            yaw: 0.0,
-            selected: MedalType::Normal,
+            yaw: catapult.initial_yaw(),
+            selected: MedalId::normal(),
             next_fire: Tick::ZERO,
         }
     }
-}
 
-impl CatapultState {
     pub fn yaw(&self) -> f32 {
         self.yaw
     }
 
-    pub fn selected(&self) -> MedalType {
-        self.selected
+    pub fn selected(&self) -> &MedalId {
+        &self.selected
     }
 
     /// 範囲外は丸める（エラーにしない）。
@@ -51,7 +45,7 @@ impl CatapultState {
         self.yaw = catapult.clamp_yaw(self.yaw + delta);
     }
 
-    pub fn select(&mut self, medal: MedalType) {
+    pub fn select(&mut self, medal: MedalId) {
         self.selected = medal;
     }
 
@@ -69,9 +63,9 @@ impl CatapultState {
         if !self.is_ready(now) {
             return None;
         }
-        self.next_fire = now + catapult.cooldown();
+        self.next_fire = now + catapult.fire_interval();
         Some(LaunchPlan {
-            medal: self.selected,
+            medal: self.selected.clone(),
             spec: *spec,
             origin: catapult.position(),
             velocity: catapult.launch_velocity(self.yaw),
@@ -88,7 +82,8 @@ mod tests {
     use crate::{
         spec::fixture::medal,
         stage::{
-            Stage,
+            CatapultParts, Stage,
+            catapult_fixture::catapult_parts,
             fixture::{parts, stage},
         },
         time::Ticks,
@@ -99,20 +94,30 @@ mod tests {
     #[case::over_max(10.0, 0.5)]
     #[case::under_min(-10.0, -0.5)]
     fn aim_is_clamped_to_catapult_range(stage: Stage, #[case] delta: f32, #[case] expected: f32) {
-        let mut state = CatapultState::default();
+        let mut state = CatapultState::new(stage.catapult());
         state.aim(delta, stage.catapult());
         assert_eq!(state.yaw(), expected);
     }
 
     #[rstest]
+    fn state_starts_at_the_stage_initial_yaw() {
+        let catapult =
+            Catapult::new(CatapultParts { initial_yaw: 0.25, ..catapult_parts() }).expect("valid");
+        let state = CatapultState::new(&catapult);
+        assert_eq!(state.yaw(), 0.25);
+        assert_eq!(state.selected(), &MedalId::normal());
+        assert!(state.is_ready(Tick::ZERO));
+    }
+
+    #[rstest]
     fn first_shot_fires_forward_from_catapult(stage: Stage) {
-        let mut state = CatapultState::default();
+        let mut state = CatapultState::new(stage.catapult());
         assert!(state.is_ready(Tick::ZERO));
         let plan = state
             .fire(stage.catapult(), &medal(), Tick::ZERO)
             .expect("ready");
         assert_eq!(plan.origin, stage.catapult().position());
-        assert_eq!(plan.medal, MedalType::Normal);
+        assert_eq!(plan.medal, MedalId::normal());
         assert!(plan.velocity.z < 0.0 && plan.velocity.y > 0.0, "{:?}", plan.velocity);
         assert!((plan.velocity.length() - 10.0).abs() < 1e-4);
     }
@@ -120,11 +125,11 @@ mod tests {
     /// 例: クールダウン30Tick。Tick 105 で発射 → 次は Tick 135 から。
     /// Tick 120 では発射されず、Tick 140 で再び発射する。
     #[rstest]
-    fn deadline_tick_decides_the_next_shot(stage: Stage) {
-        let catapult = stage.catapult().clone();
-        let catapult = Catapult::new(catapult.position(), 0.0, (0.0, 0.0), 0.2, 10.0, Ticks(30))
-            .expect("valid");
-        let mut state = CatapultState::default();
+    fn deadline_tick_decides_the_next_shot() {
+        let catapult =
+            Catapult::new(CatapultParts { fire_interval: Ticks(30), ..catapult_parts() })
+                .expect("valid");
+        let mut state = CatapultState::new(&catapult);
         assert!(state.fire(&catapult, &medal(), Tick(105)).is_some());
         assert_eq!(state.next_fire(), Tick(135));
 
@@ -141,8 +146,8 @@ mod tests {
     /// 発射ボタンを押し続けたとき、毎tick評価しても発射はクールダウンごとにしか起きない。
     /// 例: クールダウン12Tick・180Tick（60Hzで3秒）押し続け → Tick 0, 12, …, 180 の16回。
     #[rstest]
-    fn holding_fire_shoots_once_per_cooldown(stage: Stage) {
-        let mut state = CatapultState::default();
+    fn holding_fire_shoots_once_per_interval(stage: Stage) {
+        let mut state = CatapultState::new(stage.catapult());
         let shots = (0..=180)
             .filter_map(|t| state.fire(stage.catapult(), &medal(), Tick(t)))
             .count();
@@ -153,7 +158,7 @@ mod tests {
         #[test]
         fn yaw_never_leaves_range(deltas in prop::collection::vec(-5.0f32..5.0, 0..50)) {
             let stage = stage(parts());
-            let mut state = CatapultState::default();
+            let mut state = CatapultState::new(stage.catapult());
             for d in deltas {
                 state.aim(d, stage.catapult());
                 prop_assert!((-0.5..=0.5).contains(&state.yaw()));
@@ -162,16 +167,16 @@ mod tests {
 
         /// どんなTickの列で評価しても、2つの発射の間隔はクールダウン以上。
         #[test]
-        fn shots_are_never_closer_than_cooldown(steps in prop::collection::vec(0u64..30, 1..200)) {
+        fn shots_are_never_closer_than_the_interval(steps in prop::collection::vec(0u64..30, 1..200)) {
             let stage = stage(parts());
-            let mut state = CatapultState::default();
+            let mut state = CatapultState::new(stage.catapult());
             let mut now = Tick::ZERO;
             let mut last: Option<Tick> = None;
             for step in steps {
                 now = now + Ticks(step);
                 if state.fire(stage.catapult(), &medal(), now).is_some() {
                     if let Some(prev) = last {
-                        prop_assert!(now - prev >= stage.catapult().cooldown());
+                        prop_assert!(now - prev >= stage.catapult().fire_interval());
                     }
                     last = Some(now);
                 }

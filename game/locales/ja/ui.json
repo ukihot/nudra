@@ -2,12 +2,17 @@
   "title": "NUDRA",
   "choose_pusher": "Pusherを選んでください",
   "character_entry": "{{index}}  {{name}}",
-  "hud": "WAVE {{wave}}\n敵 {{enemies}}\n撃破 {{defeated}}\nLV {{level}}",
-  "controls": "A/D・←/→: 照準\nSpace・クリック・タップ: 発射",
+  "hud": "WAVE {{wave}}/4\n敵 {{enemies}}\n撃破 {{defeated}}\nLV {{level}}\n進化 {{gauge}}%",
+  "controls": "A/D・←/→: 照準\nSpace・クリック・タップの長押し: 発射\nF: オート連射切替 · Tab: メダル切替",
   "game_over": "ゲームオーバー",
   "defeated": "撃破数 {{defeated}}",
   "best_record": "最高記録 {{best}}",
   "new_record": "新記録！  最高記録 {{best}}",
   "play_time": "プレイ時間 {{time}}",
-  "continue": "クリックまたはEnterで戻る"
+  "continue": "クリックまたはEnterで戻る",
+  "victory": "ステージクリア",
+  "evolve": "進化を選んでください",
+  "level_up": "レベルアップ",
+  "fuse": "錬成",
+  "new_medal": "New!"
 }

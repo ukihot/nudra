@@ -1,15 +1,15 @@
 //! ユースケース（基本設計 4章）。Bevy・Avianに依存しない。
 //! ユースケースは関数で、外側への指示は戻り値で返す。
 
+mod evolve;
 mod launch_medal;
-mod level_up;
 mod progress;
 mod resolve;
 mod start_game;
 mod waves;
 
+pub use evolve::{EvolveOutput, evolve};
 pub use launch_medal::{LaunchMedalError, LaunchOutput, launch_medal};
-pub use level_up::{LevelUpOutput, level_up};
 pub use progress::{
     ProgressStoreError, RecordResultError, load_progress, record_result, save_progress,
 };

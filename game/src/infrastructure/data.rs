@@ -1,7 +1,10 @@
 //! 定義データ（RON）の読込・Domainへの変換・Catalog（基本設計 5.5, 3.11）。
 //! DTOとDomainは分離し、Domainの型にはserdeを付けない。
 
-use std::collections::HashMap;
+use std::{
+    collections::{BTreeMap, HashMap},
+    num::NonZeroU32,
+};
 
 use anyhow::{Context, bail};
 // Bevy 0.20 の prelude は `ContextExt`（`.context()`）を含み `anyhow::Context`
@@ -15,15 +18,19 @@ use bevy::{
     },
 };
 use domain::{
-    id::{BridgeId, EnemyTypeId, GoalId, PusherCharacterId, RailId, StageId},
+    difficulty::{Difficulty, UnknownDifficulty},
+    id::{BridgeId, EnemyTypeId, GoalId, MedalId, PusherCharacterId, RailId, StageId},
     math::Vec3,
     positive::{NotPositive, Positive},
     pusher::{MovementPattern, PusherCharacter, PusherStats},
     repository::{PusherCharacterRepository, StageRepository},
-    spec::{EnemySpec, MedalSpec, MedalType, SpecCatalog, SpecError, SpecialKind},
+    spec::{
+        EnemySpec, EvolutionRules, MedalDef, MedalSpec, MedalTier, SpecCatalog, SpecError,
+        SpecParts,
+    },
     stage::{
-        Abyss, Bridge, Catapult, Geometry, Goal, InitialMedalPlacement, Rail, Shape, SpawnEntry,
-        Stage, StageError, StageParts, Wave, WavePlan,
+        Abyss, Bridge, Catapult, CatapultParts, Geometry, Goal, InitialMedalPlacement, Rail, Shape,
+        SpawnEntry, Stage, StageError, StageParts, Wave, WavePlan,
     },
     time::Ticks,
 };
@@ -48,7 +55,7 @@ pub struct StageAsset {
     rails: Vec<RailDto>,
     goals: Vec<GoalDto>,
     initial_medals: Vec<GridDto>,
-    waves: Vec<Vec<SpawnDto>>,
+    waves: Vec<WaveDto>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -68,9 +75,10 @@ struct CatapultDto {
     position: [f32; 3],
     base_yaw_deg: f32,
     yaw_range_deg: (f32, f32),
+    initial_yaw_deg: f32,
     pitch_deg: f32,
     speed: f32,
-    cooldown_ms: u64,
+    fire_interval_ms: u64,
 }
 
 #[derive(Deserialize, Debug)]
@@ -98,6 +106,13 @@ struct GoalDto {
     id: u16,
     position: [f32; 3],
     radius: f32,
+    /// この難易度（1〜4）以上で有効。省略時は1（Easy）
+    #[serde(default = "easy")]
+    available_from: u8,
+}
+
+fn easy() -> u8 {
+    Difficulty::EASY.level()
 }
 
 #[derive(Deserialize, Debug)]
@@ -117,6 +132,23 @@ struct SpawnDto {
     goal: u16,
 }
 
+#[derive(Deserialize, Debug)]
+struct WaveDto {
+    spawns: Vec<SpawnDto>,
+    boss: SpawnDto,
+}
+
+impl SpawnDto {
+    fn to_domain(&self) -> SpawnEntry {
+        SpawnEntry {
+            at: Ticks::from_millis_ceil(self.at_ms, TICK_HZ),
+            enemy: EnemyTypeId::new(&self.enemy),
+            bridge: BridgeId(self.bridge),
+            goal: GoalId(self.goal),
+        }
+    }
+}
+
 #[derive(Asset, TypePath, Deserialize, Debug)]
 pub struct CharacterAsset {
     id: String,
@@ -130,24 +162,34 @@ pub struct CharacterAsset {
 
 #[derive(Asset, TypePath, Deserialize, Debug)]
 pub struct SpecsAsset {
-    medals: Vec<MedalSpecDto>,
+    medals: Vec<MedalDefDto>,
     enemies: Vec<EnemySpecDto>,
+    fusions: Vec<(String, String, String)>,
+    evolution: EvolutionDto,
 }
 
 #[derive(Deserialize, Debug, Clone, Copy)]
-enum MedalKindDto {
+enum MedalTierDto {
     Normal,
-    Fire,
-    Ice,
-    Explosion,
-    Heavy,
-    Magnet,
-    Bounce,
+    Element,
+    Fusion,
+}
+
+#[derive(Deserialize, Debug)]
+struct MedalDefDto {
+    id: String,
+    tier: MedalTierDto,
+    levels: [MedalSpecDto; 4],
+}
+
+#[derive(Deserialize, Debug)]
+struct EvolutionDto {
+    threshold: NonZeroU32,
+    points_per_medal: [u32; 4],
 }
 
 #[derive(Deserialize, Debug)]
 struct MedalSpecDto {
-    kind: MedalKindDto,
     mass: f32,
     radius: f32,
     thickness: f32,
@@ -171,11 +213,15 @@ struct EnemySpecDto {
 #[derive(Debug, thiserror::Error)]
 pub enum DataError {
     #[error(transparent)]
+    Difficulty(#[from] UnknownDifficulty),
+    #[error(transparent)]
     NotPositive(#[from] NotPositive),
     #[error(transparent)]
     Stage(#[from] StageError),
     #[error(transparent)]
     Spec(#[from] SpecError),
+    #[error("duplicate medal id: {0}")]
+    DuplicateMedal(MedalId),
 }
 
 fn v(a: [f32; 3]) -> Vec3 {
@@ -200,14 +246,15 @@ impl StageAsset {
                 },
                 floor_y: self.geometry.floor_y,
             },
-            catapult: Catapult::new(
-                v(c.position),
-                c.base_yaw_deg.to_radians(),
-                (c.yaw_range_deg.0.to_radians(), c.yaw_range_deg.1.to_radians()),
-                c.pitch_deg.to_radians(),
-                c.speed,
-                Ticks::from_millis_ceil(c.cooldown_ms, TICK_HZ),
-            )?,
+            catapult: Catapult::new(CatapultParts {
+                position: v(c.position),
+                base_yaw: c.base_yaw_deg.to_radians(),
+                yaw_range: (c.yaw_range_deg.0.to_radians(), c.yaw_range_deg.1.to_radians()),
+                initial_yaw: c.initial_yaw_deg.to_radians(),
+                pitch: c.pitch_deg.to_radians(),
+                speed: c.speed,
+                fire_interval: Ticks::from_millis_ceil(c.fire_interval_ms, TICK_HZ),
+            })?,
             bridges: self
                 .bridges
                 .iter()
@@ -238,6 +285,7 @@ impl StageAsset {
                         id: GoalId(g.id),
                         position: v(g.position),
                         radius: pos(g.radius)?,
+                        available_from: Difficulty::new(g.available_from)?,
                     })
                 })
                 .collect::<Result<_, DataError>>()?,
@@ -259,14 +307,8 @@ impl StageAsset {
                     .iter()
                     .map(|wave| {
                         Wave::new(
-                            wave.iter()
-                                .map(|s| SpawnEntry {
-                                    at: Ticks::from_millis_ceil(s.at_ms, TICK_HZ),
-                                    enemy: EnemyTypeId::new(&s.enemy),
-                                    bridge: BridgeId(s.bridge),
-                                    goal: GoalId(s.goal),
-                                })
-                                .collect(),
+                            wave.spawns.iter().map(SpawnDto::to_domain).collect(),
+                            wave.boss.to_domain(),
                         )
                     })
                     .collect(),
@@ -292,37 +334,37 @@ impl CharacterAsset {
     }
 }
 
-impl From<MedalKindDto> for MedalType {
-    fn from(kind: MedalKindDto) -> Self {
-        let special = |k| MedalType::Special(k);
-        match kind {
-            MedalKindDto::Normal => MedalType::Normal,
-            MedalKindDto::Fire => special(SpecialKind::Fire),
-            MedalKindDto::Ice => special(SpecialKind::Ice),
-            MedalKindDto::Explosion => special(SpecialKind::Explosion),
-            MedalKindDto::Heavy => special(SpecialKind::Heavy),
-            MedalKindDto::Magnet => special(SpecialKind::Magnet),
-            MedalKindDto::Bounce => special(SpecialKind::Bounce),
-        }
-    }
-}
-
 impl SpecsAsset {
     pub fn to_domain(&self) -> Result<SpecCatalog, DataError> {
-        let medals = self
-            .medals
-            .iter()
-            .map(|m| {
-                let spec = MedalSpec {
-                    mass: pos(m.mass)?,
-                    radius: pos(m.radius)?,
-                    thickness: pos(m.thickness)?,
-                    friction: m.friction,
-                    restitution: m.restitution,
-                };
-                Ok((m.kind.into(), spec))
-            })
-            .collect::<Result<HashMap<_, _>, DataError>>()?;
+        let mut medals = BTreeMap::new();
+        for def in &self.medals {
+            let id = MedalId::new(&def.id);
+            let levels = def
+                .levels
+                .iter()
+                .map(|m| {
+                    Ok(MedalSpec {
+                        mass: pos(m.mass)?,
+                        radius: pos(m.radius)?,
+                        thickness: pos(m.thickness)?,
+                        friction: m.friction,
+                        restitution: m.restitution,
+                    })
+                })
+                .collect::<Result<Vec<_>, DataError>>()?;
+            let tier = match def.tier {
+                MedalTierDto::Normal => MedalTier::Normal,
+                MedalTierDto::Element => MedalTier::Element,
+                MedalTierDto::Fusion => MedalTier::Fusion,
+            };
+            let levels = levels.try_into().expect("DTO has exactly four levels");
+            if medals
+                .insert(id.clone(), MedalDef { tier, levels })
+                .is_some()
+            {
+                return Err(DataError::DuplicateMedal(id));
+            }
+        }
         let enemies = self
             .enemies
             .iter()
@@ -338,7 +380,19 @@ impl SpecsAsset {
                 Ok((EnemyTypeId::new(&e.id), spec))
             })
             .collect::<Result<HashMap<_, _>, DataError>>()?;
-        Ok(SpecCatalog::new(medals, enemies)?)
+        Ok(SpecCatalog::new(SpecParts {
+            medals,
+            enemies,
+            fusions: self
+                .fusions
+                .iter()
+                .map(|(a, b, result)| (MedalId::new(a), MedalId::new(b), MedalId::new(result)))
+                .collect(),
+            evolution: EvolutionRules {
+                threshold: self.evolution.threshold,
+                points_per_medal: self.evolution.points_per_medal,
+            },
+        })?)
     }
 }
 
@@ -515,5 +569,106 @@ fn exit_on_error(In(result): In<anyhow::Result<()>>, mut exit: MessageWriter<App
     if let Err(e) = result {
         error!("{e:?}");
         exit.write(AppExit::error());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use domain::evolution::MedalLevel;
+    use rstest::rstest;
+
+    use super::*;
+
+    fn specs_asset() -> SpecsAsset {
+        ron::from_str(include_str!("../../assets/data/game.specs.ron")).expect("valid RON")
+    }
+
+    #[test]
+    fn bundled_specs_include_all_sixteen_elements_at_four_levels() {
+        let asset = specs_asset();
+        let catalog = asset.to_domain().expect("valid specs");
+        assert_eq!(catalog.elements().count(), 16);
+        for medal in catalog.elements() {
+            for level in 1..=4 {
+                assert!(
+                    catalog
+                        .medal(medal, MedalLevel::new(level).expect("level"))
+                        .is_some()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn all_72_recipes_match_the_supplied_matrix_in_both_directions() {
+        let catalog = specs_asset().to_domain().expect("valid catalog");
+        let names: BTreeMap<String, String> =
+            serde_json::from_str(include_str!("../../locales/ja/medals.json"))
+                .expect("medal names");
+        let id_for_name = |name: &str| {
+            MedalId::new(
+                names
+                    .iter()
+                    .find(|(_, value)| value.as_str() == name)
+                    .expect("name has an ID")
+                    .0,
+            )
+        };
+        let rows: Vec<Vec<&str>> = include_str!("../../../docs/medal-fusions.csv")
+            .lines()
+            .map(|line| line.split(',').collect())
+            .collect();
+        assert_eq!(catalog.medals().count(), 89);
+        assert_eq!(catalog.fusions().count(), 72);
+        assert_eq!(rows.len(), 17);
+        for i in 1..17 {
+            assert_eq!(rows[i].len(), 17);
+            assert_eq!(rows[i][0], rows[0][i]);
+            for j in 1..17 {
+                assert_eq!(rows[i][j], rows[j][i], "matrix must be symmetric");
+                let expected = match rows[i][j] {
+                    "×" | "—" => None,
+                    name => Some(id_for_name(name)),
+                };
+                assert_eq!(
+                    catalog.fusion(&id_for_name(rows[i][0]), &id_for_name(rows[0][j])),
+                    expected,
+                    "{} + {}",
+                    rows[i][0],
+                    rows[0][j]
+                );
+            }
+        }
+    }
+
+    #[rstest]
+    #[case("fire", "water", "sauna")]
+    #[case("fire", "poison", "spicy_food")]
+    #[case("star", "purification", "wish")]
+    #[case("blade", "lightning", "chainsaw")]
+    fn casual_fusion_recipes_are_symmetric(#[case] a: &str, #[case] b: &str, #[case] result: &str) {
+        let catalog = specs_asset().to_domain().expect("valid specs");
+        assert_eq!(
+            catalog.fusion(&MedalId::new(a), &MedalId::new(b)),
+            Some(MedalId::new(result))
+        );
+        assert_eq!(
+            catalog.fusion(&MedalId::new(b), &MedalId::new(a)),
+            Some(MedalId::new(result))
+        );
+    }
+
+    #[test]
+    fn duplicate_medal_ids_are_rejected_before_building_the_catalog() {
+        let mut asset = specs_asset();
+        asset.medals[1].id = asset.medals[0].id.clone();
+        assert!(matches!(asset.to_domain(), Err(DataError::DuplicateMedal(_))));
+    }
+
+    #[test]
+    fn invalid_physics_in_a_later_level_is_rejected() {
+        let mut asset = specs_asset();
+        asset.medals[0].levels[3].mass = f32::NAN;
+        assert!(matches!(asset.to_domain(), Err(DataError::NotPositive(_))));
     }
 }
