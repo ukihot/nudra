@@ -44,6 +44,17 @@ fn format_only_rule_accepts_numbers_and_rejects_words() {
 }
 
 #[test]
+fn player_preferences_and_i18n_use_the_same_default_language() {
+    use domain::progress::Language;
+    use game::presentation::keys::{DEFAULT_LANG, ENGLISH_LANG, JAPANESE_LANG};
+    let expected = match Language::default() {
+        Language::Japanese => JAPANESE_LANG,
+        Language::English => ENGLISH_LANG,
+    };
+    assert_eq!(DEFAULT_LANG, expected);
+}
+
+#[test]
 fn presentation_has_no_string_literals() {
     let src = Path::new(SRC);
     let mut files = vec![src.join("presentation.rs")];

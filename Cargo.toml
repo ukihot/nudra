@@ -5,7 +5,7 @@ members = ["crates/domain", "crates/application", "game"]
 [workspace.package]
 edition = "2024"
 version = "0.1.0"
-rust-version = "1.94"
+rust-version = "1.100"
 
 [workspace.dependencies]
 domain = { path = "crates/domain" }

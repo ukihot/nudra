@@ -1,0 +1,37 @@
+#!/bin/sh
+# NUDRA: CLAUDE.md「コード編集後の必須手順」に従う。
+# コミット時に自動整形し、整形結果をステージして検証する。
+set -eu
+
+cd "$(git rev-parse --show-toplevel)"
+
+# 未ステージの変更がある場合、意図しない混入を避ける。
+if ! git diff --quiet; then
+    printf '%s\n' 'NUDRA: unstaged changes exist. Stage or stash them first.' >&2
+    exit 1
+fi
+
+set -- -p domain -p application
+
+# game・共通設定・hook自身の変更ではgameも検証する。
+if git diff --cached --quiet -- game/ Cargo.toml Cargo.lock .cargo/ .githooks/pre-commit; then
+    :
+else
+    status=$?
+    [ "$status" -eq 1 ] || exit "$status"
+    set -- "$@" -p game
+fi
+
+printf '%s\n' 'NUDRA: formatting (nightly rustfmt)...'
+cargo +nightly fmt --all
+
+# 整形された追跡済みRustファイルをステージする。
+git add -u -- '*.rs'
+
+printf '%s\n' 'NUDRA: running Clippy (zero warnings)...'
+cargo clippy "$@" --all-targets -- -D warnings
+
+printf '%s\n' 'NUDRA: running tests (cargo-nextest)...'
+cargo nextest run "$@"
+
+printf '%s\n' 'NUDRA: all required checks passed.'

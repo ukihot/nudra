@@ -14,5 +14,19 @@
   "evolve": "進化を選んでください",
   "level_up": "レベルアップ",
   "fuse": "錬成",
-  "new_medal": "New!"
+  "new_medal": "New!",
+  "choose_stage": "ステージ",
+  "credits_body": "NUDRA\n\nゲームエンジン: Bevy\n物理エンジン: Avian\n多言語表示: bevy-intl\n各ライブラリ: MIT / Apache License 2.0\n\nフォント: Noto Sans JP\nCopyright 2014–2021 Adobe\nSIL Open Font License 1.1\nフォントのライセンス全文を同梱しています。",
+  "credits": "クレジット",
+  "preparation_controls": "数字: プッシャー　←/→: ステージ　↑/↓: 難易度　Enter: 開始　Esc: 戻る",
+  "english": "English",
+  "prepare": "準備をする",
+  "locked_difficulty": "難易度 {{level}}・未解禁",
+  "difficulty": "難易度",
+  "options": "オプション",
+  "japanese": "日本語",
+  "start": "はじめる",
+  "language": "言語",
+  "back": "タイトルへ戻る",
+  "difficulty_level": "難易度 {{level}}"
 }

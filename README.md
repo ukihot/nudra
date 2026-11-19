@@ -42,11 +42,13 @@ game の中では Infrastructure と Presentation が互いを参照せず、`ga
 - [x] セーブ: オフラインファースト（ローカルのバイナリファイル、版管理・バックアップ・読込時検証）
 - [x] game: 射出・敵の侵攻と撃破・4Waveと勝敗・進化中の時計／物理停止・進化画面・メダル選択
 - [x] メダル定義: ノーマル1種・素材16種・錬成72種（全89種）、日英の表示名、[錬成表](docs/medal-fusions.csv)との全組み合わせ照合
-- [ ] 属性の特殊効果、難易度選択UI、物理バランスと実機での性能検証
+- [x] アウトゲーム: タイトル（準備をする／オプション／クレジット）、Pusher・ステージ・解禁済み難易度の選択、言語設定の保存
+- [ ] 属性の特殊効果、物理バランスと実機での性能検証
 - [ ] 2.5Dの見た目（現在は仮の図形。アセットは未作成）
 
 操作: A/D・左右キーで照準、Space・クリック・タップの長押しで連射、Fでオート連射切替、Tabまたはメダルボタンで射出メダルを選択します。
-進化ゲージが満タンになると時計と物理が止まり、レベルアップ・錬成・New!を選べます。現在の開始難易度はEasy固定です。
+進化ゲージが満タンになると時計と物理が止まり、レベルアップ・錬成・New!を選べます。
+ステージをクリアすると1つ上の難易度が解禁されます。オプションの言語設定とクリア実績はローカルへ保存されます。
 
 ## オフラインファースト
 
@@ -70,7 +72,7 @@ game の中では Infrastructure と Presentation が互いを参照せず、`ga
 
 必要なもの:
 
-- Rust stable（1.94以上）
+- Rust stable（1.100以上）
 - Rust nightly（`rustfmt.toml` が nightly のオプションを使うため、フォーマットに必要）
 - [cargo-nextest](https://nexte.st/)
 
@@ -94,6 +96,18 @@ cargo clippy --workspace --all-targets
 # フォーマット（nightly必須）
 cargo +nightly fmt --all
 ```
+
+## コミット前の検証
+
+`.githooks/pre-commit`はCLAUDE.mdの必須手順に従い、nightly rustfmtによる自動整形、警告ゼロのclippy、cargo-nextestを順に実行します。
+domain・applicationを常に検証し、game・共通Cargo設定・hook自身にステージ済み変更があればgameも加えます。
+未ステージの変更があれば中断し、変更がなければ整形された追跡済みRustファイルをステージしてから検証します。有効化は次のコマンドです。
+
+```sh
+git config core.hooksPath .githooks
+```
+
+日本語フォントとライセンスは`game/assets/fonts/`、主要ライブラリのライセンスは`game/assets/licenses/`に同梱しています。
 
 ## ドキュメント
 

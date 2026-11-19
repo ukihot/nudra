@@ -69,6 +69,10 @@ fn app() -> App {
 }
 
 fn app_with_save_dir(dir: tempfile::TempDir) -> App {
+    app_with_setup(dir, |_| {})
+}
+
+fn app_with_setup(dir: tempfile::TempDir, setup: impl FnOnce(&mut App)) -> App {
     let mut app = App::new();
     app.insert_resource(FallbackErrorHandler(panic))
         .insert_resource(FileProgressRepository::in_dir(dir.path()))
@@ -83,6 +87,7 @@ fn app_with_save_dir(dir: tempfile::TempDir) -> App {
         .add_plugins(game::core_plugin)
         .init_resource::<Recorded>()
         .add_systems(Last, record);
+    setup(&mut app);
     // App::run と同じく Plugin の finish / cleanup を呼ぶ（Avian などが finish で Resource
     // を登録する）
     app.finish();
@@ -155,7 +160,10 @@ fn set_fire(app: &mut App, fire: bool) {
 
 fn loaded() -> App {
     let mut app = app();
-    run_until(&mut app, 3000, |a| app_state(a) == AppState::CharacterSelect);
+    run_until(&mut app, 3000, |a| app_state(a) == AppState::Title);
+    submit(&mut app, Request::Navigate(game::port::OutgameScreen::Preparation));
+    run_until(&mut app, 10, |a| app_state(a) == AppState::CharacterSelect);
+    *app.world_mut().resource_mut::<Recorded>() = Recorded::default();
     app
 }
 
@@ -163,7 +171,11 @@ fn started() -> App {
     let mut app = loaded();
     submit(
         &mut app,
-        Request::Start { character: PusherCharacterId::new("mop_rabbit") },
+        Request::Start {
+            character: PusherCharacterId::new("mop_rabbit"),
+            stage: domain::id::StageId::new("stage_01"),
+            difficulty: domain::difficulty::Difficulty::EASY,
+        },
     );
     run_until(&mut app, 10, |a| phase(a) == Some(GamePhase::Running));
     app
@@ -209,6 +221,104 @@ fn definition_data_loads_into_character_select() {
 }
 
 #[test]
+fn boot_opens_title_with_exactly_three_menu_actions() {
+    let mut app = app_with_setup(tempfile::tempdir().expect("dir"), |app| {
+        app.init_resource::<ButtonInput<KeyCode>>()
+            .add_plugins(game::presentation::outgame::plugin);
+    });
+    run_until(&mut app, 3000, |a| app_state(a) == AppState::Title);
+    let actions: Vec<_> = app
+        .world_mut()
+        .query::<&game::presentation::outgame::MenuAction>()
+        .iter(app.world())
+        .map(|a| a.0)
+        .collect();
+    assert_eq!(actions.len(), 3);
+    for screen in [
+        game::port::OutgameScreen::Preparation,
+        game::port::OutgameScreen::Options,
+        game::port::OutgameScreen::Credits,
+    ] {
+        assert!(actions.contains(&screen));
+    }
+    assert_eq!(count::<MedalKind>(&mut app), 0);
+}
+
+#[test]
+fn options_language_is_saved_and_restored_on_restart() {
+    use domain::progress::Language;
+    use game::port::{OptionsModel, OutgameScreen};
+    let mut app = app_with_setup(tempfile::tempdir().expect("dir"), |app| {
+        app.init_resource::<ButtonInput<KeyCode>>()
+            .add_plugins(bevy_intl::I18nPlugin::with_config(bevy_intl::I18nConfig {
+                default_lang: "ja".into(),
+                fallback_lang: "en".into(),
+                ..default()
+            }))
+            .add_plugins(game::presentation::outgame::plugin);
+    });
+    run_until(&mut app, 3000, |a| app_state(a) == AppState::Title);
+    submit(&mut app, Request::Navigate(OutgameScreen::Options));
+    run_until(&mut app, 10, |a| app_state(a) == AppState::Options);
+    submit(&mut app, Request::SetLanguage(Language::English));
+    run_until(&mut app, 200, |a| {
+        save_settled(a) && saved(a).language() == Language::English
+    });
+    run_until(&mut app, 10, |a| {
+        a.world_mut()
+            .query::<&Text>()
+            .iter(a.world())
+            .any(|text| text.0 == "Options")
+    });
+    let dir = tempfile::tempdir().expect("dir");
+    std::fs::copy(
+        app.world().resource::<FileProgressRepository>().path(),
+        dir.path().join("progress.sav"),
+    )
+    .expect("copy save");
+    let mut restarted = app_with_save_dir(dir);
+    run_until(&mut restarted, 3000, |a| app_state(a) == AppState::Title);
+    assert_eq!(
+        restarted.world().resource::<OptionsModel>().language,
+        Language::English
+    );
+    submit(&mut app, Request::Navigate(OutgameScreen::Title));
+    run_until(&mut app, 10, |a| app_state(a) == AppState::Title);
+    submit(&mut app, Request::Navigate(OutgameScreen::Credits));
+    run_until(&mut app, 10, |a| app_state(a) == AppState::Credits);
+    submit(&mut app, Request::Navigate(OutgameScreen::Title));
+    run_until(&mut app, 10, |a| app_state(a) == AppState::Title);
+    assert_eq!(count::<MedalKind>(&mut app), 0);
+}
+
+#[test]
+fn locked_difficulty_and_unknown_stage_are_rejected_without_starting() {
+    use domain::{difficulty::Difficulty, id::StageId};
+    let mut app = loaded();
+    for (stage, difficulty) in [
+        (StageId::new("stage_01"), Difficulty::new(2).expect("difficulty")),
+        (StageId::new("missing"), Difficulty::EASY),
+    ] {
+        let outcomes = recorded(&app).outcomes.len();
+        submit(
+            &mut app,
+            Request::Start {
+                character: PusherCharacterId::new("mop_rabbit"),
+                stage,
+                difficulty,
+            },
+        );
+        run_until(&mut app, 10, |a| recorded(a).outcomes.len() > outcomes);
+        assert!(matches!(
+            recorded(&app).outcomes.last().expect("outcome").status,
+            RequestStatus::Rejected(RejectReason::Invalid(_))
+        ));
+        assert_eq!(app_state(&app), AppState::CharacterSelect);
+        assert!(app.world().get_resource::<ActiveGame>().is_none());
+    }
+}
+
+#[test]
 fn start_request_completes_and_builds_the_stage() {
     let mut app = started();
     app.update();
@@ -233,7 +343,11 @@ fn start_request_completes_and_builds_the_stage() {
 #[test]
 fn duplicate_start_requests_are_rejected_after_the_first() {
     let mut app = loaded();
-    let start = || Request::Start { character: PusherCharacterId::new("mop_rabbit") };
+    let start = || Request::Start {
+        character: PusherCharacterId::new("mop_rabbit"),
+        stage: domain::id::StageId::new("stage_01"),
+        difficulty: domain::difficulty::Difficulty::EASY,
+    };
     submit(&mut app, start());
     submit(&mut app, start());
     run_until(&mut app, 10, |a| recorded(a).outcomes.len() == 2);
@@ -256,7 +370,11 @@ fn unknown_character_is_rejected_and_stays_in_select() {
     let mut app = loaded();
     submit(
         &mut app,
-        Request::Start { character: PusherCharacterId::new("nobody") },
+        Request::Start {
+            character: PusherCharacterId::new("nobody"),
+            stage: domain::id::StageId::new("stage_01"),
+            difficulty: domain::difficulty::Difficulty::EASY,
+        },
     );
     run_until(&mut app, 10, |a| !recorded(a).outcomes.is_empty());
     assert!(matches!(
@@ -570,6 +688,31 @@ fn final_boss_defeat_wins_and_records_the_result() {
     assert_eq!(progress.games_played(), 1);
     assert_eq!(
         progress
+            .unlocked_difficulty(&domain::id::StageId::new("stage_01"))
+            .level(),
+        2
+    );
+    submit(&mut app, Request::Menu);
+    run_until(&mut app, 10, |a| app_state(a) == AppState::CharacterSelect);
+    submit(
+        &mut app,
+        Request::Start {
+            character: PusherCharacterId::new("mop_rabbit"),
+            stage: domain::id::StageId::new("stage_01"),
+            difficulty: domain::difficulty::Difficulty::new(2).expect("difficulty"),
+        },
+    );
+    run_until(&mut app, 10, |a| phase(a) == Some(GamePhase::Running));
+    assert_eq!(
+        app.world()
+            .resource::<ActiveGame>()
+            .session
+            .difficulty()
+            .level(),
+        2
+    );
+    assert_eq!(
+        progress
             .record(&domain::id::StageId::new("stage_01"))
             .expect("record")
             .best_defeated(),
@@ -751,10 +894,17 @@ fn broken_save_does_not_block_play() {
     let dir = tempfile::tempdir().expect("temp dir");
     std::fs::write(dir.path().join("progress.sav"), b"not a save file").expect("write");
     let mut app = app_with_save_dir(dir);
-    run_until(&mut app, 3000, |a| app_state(a) == AppState::CharacterSelect);
+    run_until(&mut app, 3000, |a| app_state(a) == AppState::Title);
+    submit(&mut app, Request::Navigate(game::port::OutgameScreen::Preparation));
+    run_until(&mut app, 10, |a| app_state(a) == AppState::CharacterSelect);
+    *app.world_mut().resource_mut::<Recorded>() = Recorded::default();
     submit(
         &mut app,
-        Request::Start { character: PusherCharacterId::new("iron_bear") },
+        Request::Start {
+            character: PusherCharacterId::new("iron_bear"),
+            stage: domain::id::StageId::new("stage_01"),
+            difficulty: domain::difficulty::Difficulty::EASY,
+        },
     );
     run_until(&mut app, 10, |a| phase(a) == Some(GamePhase::Running));
     run_until(&mut app, 200, save_settled);

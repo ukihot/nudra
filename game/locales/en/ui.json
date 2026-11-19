@@ -14,5 +14,19 @@
   "evolve": "Choose an evolution",
   "level_up": "Level up",
   "fuse": "Fuse",
-  "new_medal": "New!"
+  "new_medal": "New!",
+  "choose_stage": "Stage",
+  "credits_body": "NUDRA\n\nGame engine: Bevy\nPhysics: Avian\nLocalization: bevy-intl\nLibraries: MIT / Apache License 2.0\n\nFont: Noto Sans JP\nCopyright 2014–2021 Adobe\nSIL Open Font License 1.1\nThe complete font license is included.",
+  "credits": "Credits",
+  "preparation_controls": "Numbers: Pusher   Left/Right: stage   Up/Down: difficulty   Enter: start   Esc: back",
+  "english": "English",
+  "prepare": "Prepare",
+  "locked_difficulty": "Difficulty {{level}} · Locked",
+  "difficulty": "Difficulty",
+  "options": "Options",
+  "japanese": "日本語",
+  "start": "Start",
+  "language": "Language",
+  "back": "Back to title",
+  "difficulty_level": "Difficulty {{level}}"
 }

@@ -12,9 +12,11 @@ use std::{borrow::Cow, time::Duration};
 
 use bevy::prelude::*;
 use domain::{
+    difficulty::Difficulty,
     event::DomainEvent,
     evolution::Evolution,
-    id::{EnemyId, EnemyTypeId, GoalId, MedalId, PusherCharacterId},
+    id::{EnemyId, EnemyTypeId, GoalId, MedalId, PusherCharacterId, StageId},
+    progress::Language,
 };
 
 // ── 入力: 意図 ────────────────────────────────────────────
@@ -34,14 +36,40 @@ pub struct ControlIntent {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Request {
+    Navigate(OutgameScreen),
+    SetLanguage(Language),
     /// キャラクターを選んでインゲームを開始する
     Start {
         character: PusherCharacterId,
+        stage: StageId,
+        difficulty: Difficulty,
     },
     Evolve(Evolution),
     SelectMedal(MedalId),
     /// リザルトからキャラクター選択へ戻る
     Menu,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutgameScreen {
+    Title,
+    Preparation,
+    Options,
+    Credits,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct StageEntry {
+    pub id: StageId,
+    pub unlocked: Difficulty,
+}
+
+#[derive(Resource, Debug, Clone, Default, PartialEq)]
+pub struct StageRoster(pub Vec<StageEntry>);
+
+#[derive(Resource, Debug, Clone, Copy, Default, PartialEq)]
+pub struct OptionsModel {
+    pub language: Language,
 }
 
 /// 指図の提出。台帳に記帳され、ID が振られる。
@@ -210,6 +238,8 @@ pub(crate) fn plugin(app: &mut App) {
         .add_message::<DomainEventMsg>()
         .init_resource::<ControlIntent>()
         .init_resource::<CharacterRoster>()
+        .init_resource::<StageRoster>()
+        .init_resource::<OptionsModel>()
         .init_resource::<HudModel>()
         .init_resource::<EvolutionModel>()
         .init_resource::<MedalModel>()

@@ -7,9 +7,12 @@
 
 use bevy_intl::{I18nMode, I18nText};
 
-/// 【仮決定】日本語グリフを持つフォントを同梱するまでは英語を既定にする（Bevyの既定フォントは日本語を含まない）。
-pub const DEFAULT_LANG: &str = "en";
+/// 初回は日本語。以後は保存された言語を使う。
+pub const DEFAULT_LANG: &str = "ja";
 pub const FALLBACK_LANG: &str = "en";
+pub const JAPANESE_LANG: &str = "ja";
+pub const ENGLISH_LANG: &str = "en";
+pub const UI_FONT: &str = "fonts/NotoSansJP.ttf";
 const UI_FILE: &str = "ui";
 
 pub const VISUAL_MANIFEST: &str = "visuals.visuals.ron";
@@ -34,10 +37,24 @@ pub enum Ui {
     LevelUp,
     Fuse,
     NewMedal,
+    Prepare,
+    Options,
+    Credits,
+    Back,
+    Language,
+    Japanese,
+    English,
+    CreditsBody,
+    ChooseStage,
+    Difficulty,
+    DifficultyLevel,
+    LockedDifficulty,
+    Start,
+    PreparationControls,
 }
 
 impl Ui {
-    pub const ALL: [Self; 16] = [
+    pub const ALL: [Self; 30] = [
         Self::Title,
         Self::ChoosePusher,
         Self::CharacterEntry,
@@ -54,6 +71,20 @@ impl Ui {
         Self::LevelUp,
         Self::Fuse,
         Self::NewMedal,
+        Self::Prepare,
+        Self::Options,
+        Self::Credits,
+        Self::Back,
+        Self::Language,
+        Self::Japanese,
+        Self::English,
+        Self::CreditsBody,
+        Self::ChooseStage,
+        Self::Difficulty,
+        Self::DifficultyLevel,
+        Self::LockedDifficulty,
+        Self::Start,
+        Self::PreparationControls,
     ];
 
     pub const fn key(self) -> &'static str {
@@ -74,6 +105,20 @@ impl Ui {
             Self::LevelUp => "level_up",
             Self::Fuse => "fuse",
             Self::NewMedal => "new_medal",
+            Self::Prepare => "prepare",
+            Self::Options => "options",
+            Self::Credits => "credits",
+            Self::Back => "back",
+            Self::Language => "language",
+            Self::Japanese => "japanese",
+            Self::English => "english",
+            Self::CreditsBody => "credits_body",
+            Self::ChooseStage => "choose_stage",
+            Self::Difficulty => "difficulty",
+            Self::DifficultyLevel => "difficulty_level",
+            Self::LockedDifficulty => "locked_difficulty",
+            Self::Start => "start",
+            Self::PreparationControls => "preparation_controls",
         }
     }
 
@@ -136,4 +181,8 @@ impl Arg {
 /// メダルIDは翻訳カタログのキーと共通。
 pub fn medal_name(medal: &domain::id::MedalId) -> I18nText {
     I18nText::new("medals", medal.as_str())
+}
+
+pub fn stage_name(stage: &domain::id::StageId) -> I18nText {
+    I18nText::new("stages", stage.as_str())
 }

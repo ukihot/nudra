@@ -2,7 +2,7 @@
 //! 保存の失敗はゲーム進行を止めない。記録はメモリ上で保持し、次の保存で再試行する。
 
 use domain::{
-    progress::{PlayerProgress, RecordOutcome},
+    progress::{PlayerProgress, ProgressError, RecordOutcome},
     repository::ProgressRepository,
     session::{GameSession, GameStatus},
 };
@@ -10,6 +10,8 @@ use domain::{
 /// 進行中のセッションは記録しない（操作の拒否）。
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum RecordResultError {
+    #[error(transparent)]
+    Progress(#[from] ProgressError),
     #[error("session is still in progress")]
     NotFinished,
 }
@@ -44,7 +46,12 @@ pub fn record_result(
     if session.status() == GameStatus::Playing {
         return Err(RecordResultError::NotFinished);
     }
-    Ok(progress.record_result(session.stage_id(), session.defeated()))
+    Ok(progress.record_session_result(
+        session.stage_id(),
+        session.defeated(),
+        session.difficulty(),
+        session.status() == GameStatus::Won,
+    )?)
 }
 
 #[cfg(test)]
@@ -153,5 +160,23 @@ mod tests {
             Err(RecordResultError::NotFinished)
         );
         assert_eq!(progress, PlayerProgress::default());
+    }
+
+    #[rstest]
+    fn play_limit_is_returned_without_modifying_progress(
+        mut session: GameSession,
+        stage: domain::stage::Stage,
+    ) {
+        session.advance(&stage, domain::time::Tick(60));
+        session.enemy_reached_goal(EnemyId(1), GoalId(1));
+        let mut progress =
+            PlayerProgress::restore(None, u32::MAX, [(stage.id().clone(), u32::MAX, 7)])
+                .expect("valid progress");
+        let before = progress.clone();
+        assert_eq!(
+            record_result(&mut progress, &session),
+            Err(RecordResultError::Progress(ProgressError::PlayLimitReached))
+        );
+        assert_eq!(progress, before);
     }
 }

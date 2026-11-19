@@ -553,7 +553,7 @@ fn finish_loading(
     commands.insert_resource(stages);
     commands.insert_resource(characters);
     commands.insert_resource(Specs(specs));
-    next.set(AppState::CharacterSelect);
+    next.set(AppState::Title);
     Ok(())
 }
 

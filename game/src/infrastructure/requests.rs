@@ -13,6 +13,8 @@ pub const TTL_FRAMES: u32 = 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RequestKind {
+    Navigate,
+    SetLanguage,
     Start,
     Evolve,
     SelectMedal,
@@ -22,6 +24,8 @@ pub enum RequestKind {
 impl RequestKind {
     pub fn of(request: &Request) -> Self {
         match request {
+            Request::Navigate(_) => Self::Navigate,
+            Request::SetLanguage(_) => Self::SetLanguage,
             Request::Start { .. } => Self::Start,
             Request::Evolve(_) => Self::Evolve,
             Request::SelectMedal(_) => Self::SelectMedal,
@@ -119,7 +123,11 @@ mod tests {
     use super::*;
 
     fn start(name: &str) -> Request {
-        Request::Start { character: PusherCharacterId::new(name) }
+        Request::Start {
+            character: PusherCharacterId::new(name),
+            stage: domain::id::StageId::new("stage_01"),
+            difficulty: domain::difficulty::Difficulty::EASY,
+        }
     }
 
     #[rstest]
@@ -219,7 +227,9 @@ mod tests {
             RequestKind::Evolve,
             RequestKind::Menu,
             RequestKind::SelectMedal,
-        ][usize::from(n % 4)]
+            RequestKind::Navigate,
+            RequestKind::SetLanguage,
+        ][usize::from(n % 6)]
     }
 
     fn request(n: u8) -> Request {
@@ -230,6 +240,8 @@ mod tests {
             )),
             RequestKind::SelectMedal => Request::SelectMedal(domain::id::MedalId::normal()),
             RequestKind::Menu => Request::Menu,
+            RequestKind::Navigate => Request::Navigate(crate::port::OutgameScreen::Title),
+            RequestKind::SetLanguage => Request::SetLanguage(domain::progress::Language::Japanese),
         }
     }
 

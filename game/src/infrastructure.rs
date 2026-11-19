@@ -2,6 +2,7 @@
 //! Presentationを参照しない。外へは `port` を通じてだけ公開する。
 
 pub mod data;
+mod outgame;
 pub mod physics;
 pub mod progress;
 pub mod requests;
@@ -12,5 +13,5 @@ pub mod world;
 use bevy::prelude::*;
 
 pub(crate) fn plugin(app: &mut App) {
-    app.add_plugins((data::plugin, progress::plugin, session::plugin));
+    app.add_plugins((data::plugin, progress::plugin, session::plugin, outgame::plugin));
 }

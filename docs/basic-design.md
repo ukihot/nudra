@@ -829,14 +829,24 @@ game/src/
 ```mermaid
 stateDiagram-v2
     [*] --> Loading
-    Loading --> CharacterSelect : 定義データの読込・検証に成功
+    Loading --> Title : 定義データの読込・検証に成功
     Loading --> [*] : 致命的エラー（AppExit::error）
-    CharacterSelect --> InGame : キャラクター決定
+    Title --> CharacterSelect : 準備をする
+    Title --> Options : オプション
+    Title --> Credits : クレジット
+    CharacterSelect --> Title : 戻る
+    Options --> Title : 戻る
+    Credits --> Title : 戻る
+    CharacterSelect --> InGame : Pusher・ステージ・解禁済み難易度を選んで開始
     InGame --> Result : GameStatusがLost / Won
     Result --> CharacterSelect
 ```
 
-- 【仮決定】ステージ選択は未確定（要件3.1）のため、当面は既定のステージを使う。
+- 起動後のアウトゲームはTitleから始める。タイトルの項目は準備をする・オプション・クレジットの3つ。
+- `CharacterSelect`は準備画面の内部状態名。Pusher・ステージ・解禁済み難易度を選び、明示的な開始ボタンで始める。
+  難易度は初期状態で1（Easy）のみ。各ステージの最高クリア難易度+1まで（上限4）を選択できる。
+  開始要求でもStage・Pusherの存在と難易度の解禁を検証する。インゲームHUDに難易度は常設しない。
+- オプションの項目は言語選択（日本語・英語）のみ。クレジットには主要ライブラリとフォントを表示し、ライセンス本文をアセットへ同梱する。
 - InGame中のサブ状態（ポーズ、レベルアップ選択中）は、成長仕様の確定時にSubStatesとして追加する。
 - InGameで生成するEntityには状態スコープ（`DespawnOnExit(AppState::InGame)`）を付け、個別の後始末を書かない。
 
@@ -990,7 +1000,13 @@ Nudraのゲームプレイは、インターネット接続・ユーザー認証
 - 読めない現行ファイルは`.corrupt`へ隔離し、`.bak`から復旧する（警告ログ）。両方とも読めなければ空の記録で始め、隔離したファイルは残す。
 - 保存先: 環境変数`NUDRA_SAVE_DIR` → OSのユーザーデータ領域`/nudra` → `./save`。
 - 保存の失敗はゲームを止めない。記録はメモリに保持し、次の保存で再試行する（`warn`ログ）。
-- 保存のタイミング: キャラクター選択時、ゲーム終了時。ファイルは数百バイトのため同期I/Oで書く（大きくなったら非同期化）。
+- 保存のタイミング: ゲーム開始受付時、ゲーム終了時、言語変更時。保存は既存の`SaveJob`へ依頼し、非同期に実行する。
+- 現行形式は`SaveV2`。版1の記録に加え、言語とステージごとの最高クリア難易度を保存する。
+  `SaveV1`はそのまま残し、読込時に移行する。旧版のプレイ回数をクリア実績とは推測せず、解禁はEasyからとする。
+  復元時は難易度1〜4、クリア実績とプレイ記録の参照整合性、ステージの重複を検証する。
+- ゲーム結果の記録は`PlayerProgress::record_session_result`だけから行う。
+  未解禁難易度、または総プレイ回数が`u32::MAX`に達している場合はエラーとし、回数・自己ベスト・クリア実績を含む集約全体を変更しない。
+  `u32::MAX - 1`からの最後の1回は全項目を一緒に記録し、その後は`PlayLimitReached`で拒否する。
 
 ## 5.8 2.5Dの外観とアセットの差し替え
 
@@ -1014,7 +1030,9 @@ Nudraのゲームプレイは、インターネット接続・ユーザー認証
   `{{引数}}` がすべて `Arg::ALL` にある、言語間で `{{引数}}` が一致する、Presentation にリテラルが無い。
 - カタログは `bundle-only` でビルド時にバイナリへ埋め込む（オフラインファーストと整合。場所は `.cargo/config.toml`）。
 - bevy-intl は crates.io の最新版（0.3）が Bevy 0.18 向けのため、Bevy 0.20 対応の master を Git 依存で使う。
-- 【仮決定】既定の言語は英語。日本語のグリフを持つフォントを同梱したら日本語を既定にする。
+- 初回の言語は日本語。以後は保存された言語を適用する。`OptionsModel`からPresentationが`I18n::set_lang`へ反映する。
+  日本語を表示できるNoto Sans JPとOFL本文を`game/assets/fonts/`へ同梱する。
+  ステージ表示名は各言語の`stages.json`へ置く。
 
 ---
 
@@ -1117,7 +1135,9 @@ stateDiagram-v2
 
 | 要求 | 受け付ける状態 | 主な却下理由 |
 |---|---|---|
-| `Start { character, difficulty }` | CharacterSelect | 未知のキャラクター、ステージ無し |
+| `Navigate(screen)` | Title、準備、Options、Credits | 許可されていない画面遷移 |
+| `SetLanguage(language)` | Options | 状態違い |
+| `Start { character, stage, difficulty }` | CharacterSelect | 未知のキャラクター／ステージ、未解禁の難易度 |
 | `Evolve(choice)`（レベルアップ・錬成） | InGame / Evolving | Lv.4のメダルのレベルアップ、錬成条件（両方Lv.4・レシピあり）を満たさない |
 | `SelectMedal(id)` | InGame / Running | 未所持のメダル、終了・進化への遷移中 |
 | `Menu` | Result | — |
@@ -1530,13 +1550,13 @@ game:
 | 9 | Railの形状 | 折れ線 | 曲線Railに必要な精度 |
 | 10 | 初期メダルの配置 | 格子配置 | 配置アルゴリズム（要件4.8） |
 | 11 | Abyss | 橋より下の奈落（確定）。判定の形は当面AABBの集合 | ステージのアセット |
-| 12 | ステージ選択 | 既定ステージに固定 | アウトゲーム仕様（要件3.1） |
+| 12 | ステージ選択（確定） | タイトルの「準備をする」からPusher・ステージ・解禁済み難易度を選ぶ | — |
 | 13 | Pusherの数 | 1体 | 要件20.2 |
 | 14 | Pusher・敵の剛体制御 | 力制限付きDynamic | 9.4の検証 |
 | 15 | 地形の衝突形状 | glTFメッシュ由来か単純形状か | 9.4の検証 |
 | 16 | GameSessionRepository | 作らない（インゲームの途中保存は無し） | 保存・再開の要件 |
 | 17 | メダル落下（確定） | 落下の成立をtickごとに集計してDomainへ渡し、進化ゲージに加算（旧方針を変更） | — |
-| 18 | セーブの対象 | 最後のキャラクター・総プレイ回数・ステージごとの記録 | アウトゲームの仕様 |
+| 18 | セーブの対象 | 最後のキャラクター・総プレイ回数・ステージごとの記録・最高クリア難易度・言語 | 版2へ移行済み |
 | 19 | 2.5Dの外観 | 固定カメラの見下ろし＋Billboard差し替え | アート方針 |
 | 20 | 進化画面中の時計 | 止める（`GamePhase::Evolving`） | 操作感の検証 |
 | 21 | 錬成の素材（確定） | 素材A・Bは消費する | — |

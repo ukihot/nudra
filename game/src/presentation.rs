@@ -7,6 +7,7 @@ mod feedback;
 mod hud;
 mod input;
 pub mod keys;
+pub mod outgame;
 pub mod play_time;
 mod select;
 mod visuals;
@@ -29,5 +30,6 @@ pub(crate) fn plugin(app: &mut App) {
         hud::plugin,
         evolution::plugin,
         feedback::plugin,
+        outgame::plugin,
     ));
 }

@@ -112,6 +112,7 @@ pub struct ActiveGame {
 pub struct Selection {
     pub stage: StageId,
     pub character: PusherCharacterId,
+    pub difficulty: Difficulty,
 }
 
 #[derive(Resource, Default)]
@@ -156,7 +157,7 @@ pub(super) fn plugin(app: &mut App) {
 
 // ── 指図 ──────────────────────────────────────────────────
 
-fn register_requests(
+pub(super) fn register_requests(
     mut submitted: MessageReader<SubmitRequest>,
     mut ledger: ResMut<RequestLedger>,
 ) {
@@ -167,7 +168,7 @@ fn register_requests(
 }
 
 /// 終端の通知とログを1か所にまとめる。
-fn report(
+pub(super) fn report(
     outcomes: impl IntoIterator<Item = RequestOutcome>,
     writer: &mut MessageWriter<RequestOutcome>,
 ) {
@@ -192,6 +193,11 @@ fn close_requests(
     let app_state = *app_state.get();
     let phase = phase.map(|p| *p.get());
     let closed = ledger.end_frame(|kind| match kind {
+        RequestKind::Navigate => matches!(
+            app_state,
+            AppState::Title | AppState::CharacterSelect | AppState::Options | AppState::Credits
+        ),
+        RequestKind::SetLanguage => app_state == AppState::Options,
         RequestKind::Start => app_state == AppState::CharacterSelect,
         RequestKind::Menu => app_state == AppState::Result,
         RequestKind::Evolve => phase == Some(GamePhase::Evolving),
@@ -216,24 +222,37 @@ fn accept_start(
     let Some((id, request)) = accepted else {
         return;
     };
-    let Request::Start { character } = &request else {
+    let Request::Start { character, stage, difficulty } = &request else {
         return;
     };
 
     // 受付で実行可否を決める（実行段階に失敗し得る処理を残さない）
-    let status = match (stages.default_stage(), characters.0.contains_key(character)) {
-        (Some(stage), true) => {
-            commands
-                .insert_resource(Selection { stage: stage.clone(), character: character.clone() });
+    let status = match (
+        stages.0.contains_key(stage),
+        characters.0.contains_key(character),
+        *difficulty <= progress.unlocked_difficulty(stage),
+    ) {
+        (true, true, true) => {
+            commands.insert_resource(Selection {
+                stage: stage.clone(),
+                character: character.clone(),
+                difficulty: *difficulty,
+            });
             progress.select_character(character.clone());
             save.request(&progress);
             next.set(AppState::InGame);
             RequestStatus::Completed
         },
-        (None, _) => RequestStatus::Rejected(RejectReason::Invalid("no stage is loaded".into())),
-        (_, false) => {
+        (false, _, _) => {
+            RequestStatus::Rejected(RejectReason::Invalid(format!("unknown stage {stage}")))
+        },
+        (_, false, _) => {
             RequestStatus::Rejected(RejectReason::Invalid(format!("unknown character {character}")))
         },
+        (_, _, false) => RequestStatus::Rejected(RejectReason::Invalid(format!(
+            "difficulty {} is locked",
+            difficulty.level()
+        ))),
     };
     report([outcome(id, request, status)], &mut outcomes);
 }
@@ -270,7 +289,7 @@ fn start_session(
         session_id: GameSessionId(counter.0),
         stage_id: selection.stage.clone(),
         character_id: selection.character.clone(),
-        difficulty: Difficulty::EASY,
+        difficulty: selection.difficulty,
         seed: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()

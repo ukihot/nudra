@@ -7,6 +7,9 @@ pub enum AppState {
     /// 定義データの読込・検証
     #[default]
     Loading,
+    Title,
+    Options,
+    Credits,
     CharacterSelect,
     InGame,
     Result,
