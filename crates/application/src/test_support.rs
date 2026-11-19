@@ -1,0 +1,136 @@
+//! applicationのテスト用フィクスチャとモック。
+
+use std::{collections::HashMap, time::Duration};
+
+use domain::{
+    id::{BridgeId, EnemyTypeId, GameSessionId, GoalId, PusherCharacterId, RailId, StageId},
+    math::Vec3,
+    positive::Positive,
+    pusher::{MovementPattern, PusherCharacter, PusherStats},
+    repository::{PusherCharacterRepository, StageRepository},
+    session::GameSession,
+    spec::{EnemySpec, MedalSpec, MedalType, SpecCatalog},
+    stage::{
+        Abyss, Bridge, Catapult, Geometry, Goal, InitialMedalPlacement, Rail, Shape, SpawnEntry,
+        Stage, StageParts, Wave, WavePlan,
+    },
+};
+use rstest::fixture;
+
+mockall::mock! {
+    pub Stages {}
+    impl StageRepository for Stages {
+        fn find(&self, id: &StageId) -> Option<Stage>;
+    }
+}
+
+mockall::mock! {
+    pub Characters {}
+    impl PusherCharacterRepository for Characters {
+        fn find(&self, id: &PusherCharacterId) -> Option<PusherCharacter>;
+    }
+}
+
+pub fn spawn(at_secs: u64) -> SpawnEntry {
+    SpawnEntry {
+        at: Duration::from_secs(at_secs),
+        enemy: EnemyTypeId::new("grunt"),
+        bridge: BridgeId(1),
+        goal: GoalId(1),
+    }
+}
+
+#[fixture]
+pub fn stage() -> Stage {
+    Stage::new(StageParts {
+        id: StageId::new("stage_01"),
+        geometry: Geometry {
+            shape: Shape::Rectangle { width: 10.0, depth: 10.0 },
+            floor_y: 0.0,
+        },
+        catapult: Catapult::new(
+            Vec3::new(0.0, 1.0, 5.0),
+            0.0,
+            (-0.5, 0.5),
+            0.2,
+            10.0,
+            Duration::from_millis(200),
+        )
+        .expect("valid catapult"),
+        bridges: vec![Bridge {
+            id: BridgeId(1),
+            entry: Vec3::X * 10.0,
+            exit: Vec3::X * 5.0,
+            width: 2.0,
+        }],
+        abysses: vec![Abyss {
+            min: Vec3::splat(-50.0),
+            max: Vec3::new(50.0, -2.0, 50.0),
+        }],
+        rails: vec![
+            Rail::new(RailId(7), vec![Vec3::new(-2.0, 0.5, 0.0), Vec3::new(2.0, 0.5, 0.0)])
+                .expect("valid rail"),
+            Rail::new(RailId(8), vec![Vec3::ZERO, Vec3::Z]).expect("valid rail"),
+        ],
+        goals: vec![Goal {
+            id: GoalId(1),
+            position: Vec3::new(0.0, 0.0, -4.0),
+            radius: 1.0,
+        }],
+        initial_medals: vec![InitialMedalPlacement::grid(Vec3::ZERO, 2, 2, 1, Vec3::ONE)],
+        wave_plan: WavePlan::new(vec![Wave::new(vec![spawn(0), spawn(1)])]),
+    })
+    .expect("valid stage")
+}
+
+#[fixture]
+pub fn character() -> PusherCharacter {
+    PusherCharacter {
+        id: PusherCharacterId::new("mop_rabbit"),
+        name: "Mop Rabbit".into(),
+        base_stats: PusherStats {
+            speed: p(2.0),
+            mass: p(10.0),
+            push_force: p(100.0),
+            push_width: p(1.5),
+        },
+        movement: MovementPattern::PingPong { pause_at_ends: 0.3 },
+    }
+}
+
+pub fn medal_spec() -> MedalSpec {
+    MedalSpec {
+        mass: p(1.0),
+        radius: p(0.3),
+        thickness: p(0.08),
+        friction: 0.5,
+        restitution: 0.1,
+    }
+}
+
+#[fixture]
+pub fn specs() -> SpecCatalog {
+    let enemy = EnemySpec {
+        mass: p(2.0),
+        radius: p(0.3),
+        height: p(0.8),
+        max_speed: 1.5,
+        walk_force: 10.0,
+        friction: 0.5,
+    };
+    SpecCatalog::new(
+        HashMap::from([(MedalType::Normal, medal_spec())]),
+        HashMap::from([(EnemyTypeId::new("grunt"), enemy)]),
+    )
+    .expect("valid specs")
+}
+
+#[fixture]
+pub fn session(stage: Stage, character: PusherCharacter) -> GameSession {
+    GameSession::start(GameSessionId(1), &stage, &character).0
+}
+
+/// テスト用の簡潔な生成。不正値ならパニックする。
+pub fn p(value: f32) -> Positive {
+    Positive::new(value).expect("positive")
+}

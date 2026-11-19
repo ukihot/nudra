@@ -1,0 +1,18 @@
+[package]
+name = "application"
+edition.workspace = true
+version.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+domain.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+rstest.workspace = true
+proptest.workspace = true
+mockall.workspace = true
