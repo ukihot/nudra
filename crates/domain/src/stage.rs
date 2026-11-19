@@ -17,13 +17,14 @@ pub use wave::{SpawnEntry, Wave, WavePlan};
 use crate::{
     id::{BridgeId, GoalId, RailId, StageId},
     math::Vec3,
+    positive::Positive,
 };
 
-/// ステージの形状。衝突形状そのものはアセット側が持ち、ここではルールに必要な寸法だけを持つ。
+/// ステージの形状。寸法はコライダーにもなるため `Positive`。
 #[derive(Debug, Clone, PartialEq)]
 pub enum Shape {
-    Rectangle { width: f32, depth: f32 },
-    Circle { radius: f32 },
+    Rectangle { width: Positive, depth: Positive },
+    Circle { radius: Positive },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -37,9 +38,9 @@ impl Geometry {
     pub fn contains_xz(&self, p: Vec3) -> bool {
         match self.shape {
             Shape::Rectangle { width, depth } => {
-                p.x.abs() <= width / 2.0 && p.z.abs() <= depth / 2.0
+                p.x.abs() <= width.get() / 2.0 && p.z.abs() <= depth.get() / 2.0
             },
-            Shape::Circle { radius } => p.x * p.x + p.z * p.z <= radius * radius,
+            Shape::Circle { radius } => p.x * p.x + p.z * p.z <= radius.get() * radius.get(),
         }
     }
 }
@@ -50,21 +51,51 @@ pub struct Bridge {
     pub id: BridgeId,
     pub entry: Vec3,
     pub exit: Vec3,
-    pub width: f32,
+    pub width: Positive,
 }
 
 /// 落下領域（AABB）。侵入判定は物理エンジンのセンサーが行う。
+/// センサーのコライダーになるため、全軸で `min < max` を保証する。
 #[derive(Debug, Clone, PartialEq)]
 pub struct Abyss {
-    pub min: Vec3,
-    pub max: Vec3,
+    min: Vec3,
+    max: Vec3,
+}
+
+impl Abyss {
+    pub fn new(min: Vec3, max: Vec3) -> Result<Self, StageError> {
+        // NaN・無限大も `min < max` かつ有限の判定で弾く
+        let size = max - min;
+        if size.is_finite() && size.cmpgt(Vec3::ZERO).all() {
+            Ok(Self { min, max })
+        } else {
+            Err(StageError::InvalidAbyss { min, max })
+        }
+    }
+
+    pub fn min(&self) -> Vec3 {
+        self.min
+    }
+
+    pub fn max(&self) -> Vec3 {
+        self.max
+    }
+
+    pub fn center(&self) -> Vec3 {
+        (self.min + self.max) / 2.0
+    }
+
+    /// 各軸の長さ（すべて正）。
+    pub fn size(&self) -> Vec3 {
+        self.max - self.min
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Goal {
     pub id: GoalId,
     pub position: Vec3,
-    pub radius: f32,
+    pub radius: Positive,
 }
 
 /// `Stage::new`に渡す組み立て用の値。
@@ -175,13 +206,14 @@ pub(crate) mod fixture {
 
     use super::*;
     use crate::id::EnemyTypeId;
+    use crate::positive::fixture::p;
 
     #[fixture]
     pub fn parts() -> StageParts {
         StageParts {
             id: StageId::new("test"),
             geometry: Geometry {
-                shape: Shape::Rectangle { width: 10.0, depth: 10.0 },
+                shape: Shape::Rectangle { width: p(10.0), depth: p(10.0) },
                 floor_y: 0.0,
             },
             catapult: Catapult::new(
@@ -197,12 +229,11 @@ pub(crate) mod fixture {
                 id: BridgeId(1),
                 entry: Vec3::new(10.0, 0.0, 0.0),
                 exit: Vec3::new(5.0, 0.0, 0.0),
-                width: 2.0,
+                width: p(2.0),
             }],
-            abysses: vec![Abyss {
-                min: Vec3::splat(-50.0),
-                max: Vec3::new(50.0, -2.0, 50.0),
-            }],
+            abysses: vec![
+                Abyss::new(Vec3::splat(-50.0), Vec3::new(50.0, -2.0, 50.0)).expect("valid abyss"),
+            ],
             rails: vec![
                 Rail::new(RailId(1), vec![Vec3::new(-2.0, 0.0, 0.0), Vec3::new(2.0, 0.0, 0.0)])
                     .expect("valid rail"),
@@ -210,7 +241,7 @@ pub(crate) mod fixture {
             goals: vec![Goal {
                 id: GoalId(1),
                 position: Vec3::new(0.0, 0.0, -4.0),
-                radius: 1.0,
+                radius: p(1.0),
             }],
             initial_medals: vec![InitialMedalPlacement::grid(Vec3::ZERO, 2, 2, 1, Vec3::ONE)],
             wave_plan: WavePlan::new(vec![Wave::new(vec![spawn(0, 1, 1), spawn(1, 1, 1)])]),
@@ -240,6 +271,7 @@ mod tests {
         fixture::{parts, spawn},
         *,
     };
+    use crate::positive::fixture::p;
 
     #[rstest]
     fn valid_stage_is_created(parts: StageParts) {
@@ -279,11 +311,30 @@ mod tests {
     }
 
     #[rstest]
-    #[case::inside_rect(Shape::Rectangle { width: 4.0, depth: 2.0 }, Vec3::new(2.0, 9.0, -1.0), true)]
-    #[case::outside_rect(Shape::Rectangle { width: 4.0, depth: 2.0 }, Vec3::new(2.1, 0.0, 0.0), false)]
-    #[case::inside_circle(Shape::Circle { radius: 1.0 }, Vec3::new(0.6, 0.0, 0.6), true)]
-    #[case::outside_circle(Shape::Circle { radius: 1.0 }, Vec3::new(0.8, 0.0, 0.8), false)]
+    #[case::inside_rect(Shape::Rectangle { width: p(4.0), depth: p(2.0) }, Vec3::new(2.0, 9.0, -1.0), true)]
+    #[case::outside_rect(Shape::Rectangle { width: p(4.0), depth: p(2.0) }, Vec3::new(2.1, 0.0, 0.0), false)]
+    #[case::inside_circle(Shape::Circle { radius: p(1.0) }, Vec3::new(0.6, 0.0, 0.6), true)]
+    #[case::outside_circle(Shape::Circle { radius: p(1.0) }, Vec3::new(0.8, 0.0, 0.8), false)]
     fn geometry_contains_xz(#[case] shape: Shape, #[case] p: Vec3, #[case] expected: bool) {
         assert_eq!(Geometry { shape, floor_y: 0.0 }.contains_xz(p), expected);
+    }
+
+    #[rstest]
+    fn abyss_exposes_center_and_size() {
+        let abyss = Abyss::new(Vec3::new(-2.0, -10.0, 0.0), Vec3::new(2.0, -2.0, 6.0)).expect("valid");
+        assert_eq!(abyss.center(), Vec3::new(0.0, -6.0, 3.0));
+        assert_eq!(abyss.size(), Vec3::new(4.0, 8.0, 6.0));
+        assert_eq!((abyss.min(), abyss.max()), (Vec3::new(-2.0, -10.0, 0.0), Vec3::new(2.0, -2.0, 6.0)));
+    }
+
+    #[rstest]
+    #[case::flat_x(Vec3::ZERO, Vec3::new(0.0, 1.0, 1.0))]
+    #[case::flat_y(Vec3::ZERO, Vec3::new(1.0, 0.0, 1.0))]
+    #[case::flat_z(Vec3::ZERO, Vec3::new(1.0, 1.0, 0.0))]
+    #[case::inverted(Vec3::ONE, Vec3::ZERO)]
+    #[case::nan(Vec3::ZERO, Vec3::new(f32::NAN, 1.0, 1.0))]
+    #[case::infinite(Vec3::ZERO, Vec3::new(f32::INFINITY, 1.0, 1.0))]
+    fn degenerate_abyss_is_rejected(#[case] min: Vec3, #[case] max: Vec3) {
+        assert!(matches!(Abyss::new(min, max), Err(StageError::InvalidAbyss { .. })));
     }
 }

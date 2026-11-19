@@ -1,0 +1,2 @@
+// モップを持ったうさぎ。軽快に往復するが押す力は弱め。
+(id: "mop_rabbit", name: "Mop Rabbit", speed: 2.5, mass: 20.0, push_force: 400.0, push_width: 1.4, pause_at_ends: 0.3)

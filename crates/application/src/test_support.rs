@@ -45,7 +45,7 @@ pub fn stage() -> Stage {
     Stage::new(StageParts {
         id: StageId::new("stage_01"),
         geometry: Geometry {
-            shape: Shape::Rectangle { width: 10.0, depth: 10.0 },
+            shape: Shape::Rectangle { width: p(10.0), depth: p(10.0) },
             floor_y: 0.0,
         },
         catapult: Catapult::new(
@@ -61,12 +61,11 @@ pub fn stage() -> Stage {
             id: BridgeId(1),
             entry: Vec3::X * 10.0,
             exit: Vec3::X * 5.0,
-            width: 2.0,
+            width: p(2.0),
         }],
-        abysses: vec![Abyss {
-            min: Vec3::splat(-50.0),
-            max: Vec3::new(50.0, -2.0, 50.0),
-        }],
+        abysses: vec![
+            Abyss::new(Vec3::splat(-50.0), Vec3::new(50.0, -2.0, 50.0)).expect("valid abyss"),
+        ],
         rails: vec![
             Rail::new(RailId(7), vec![Vec3::new(-2.0, 0.5, 0.0), Vec3::new(2.0, 0.5, 0.0)])
                 .expect("valid rail"),
@@ -75,7 +74,7 @@ pub fn stage() -> Stage {
         goals: vec![Goal {
             id: GoalId(1),
             position: Vec3::new(0.0, 0.0, -4.0),
-            radius: 1.0,
+            radius: p(1.0),
         }],
         initial_medals: vec![InitialMedalPlacement::grid(Vec3::ZERO, 2, 2, 1, Vec3::ONE)],
         wave_plan: WavePlan::new(vec![Wave::new(vec![spawn(0), spawn(1)])]),

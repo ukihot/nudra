@@ -1,0 +1,20 @@
+// 見た目の定義（Presentation）。key は Infrastructure が付ける Appearance の key。
+// アセットが用意できたら、該当行を次のどちらかに書き換えるだけで差し替わる（ホットリロード対応）:
+//   2.5Dの絵:   "enemy/grunt": Billboard(image: "sprites/grunt.png", height: 1.2),
+//   3Dモデル:   "pusher/mop_rabbit": Model(scene: "models/mop_rabbit.glb#Scene0"),
+(
+    default: Placeholder(color: (0.6, 0.6, 0.6)),
+    entries: {
+        "stage/floor": Placeholder(color: (0.24, 0.27, 0.16)),
+        "stage/bridge": Placeholder(color: (0.33, 0.27, 0.18)),
+        "stage/spawn": Placeholder(color: (0.18, 0.14, 0.12)),
+        "stage/goal": Placeholder(color: (0.75, 0.2, 0.15)),
+        "catapult": Placeholder(color: (0.45, 0.42, 0.4)),
+        "medal/normal": Placeholder(color: (0.95, 0.78, 0.25)),
+        "medal/heavy": Placeholder(color: (0.55, 0.55, 0.6)),
+        "enemy/grunt": Placeholder(color: (0.62, 0.7, 0.38)),
+        "enemy/brute": Placeholder(color: (0.45, 0.32, 0.5)),
+        "pusher/mop_rabbit": Placeholder(color: (0.92, 0.9, 0.95)),
+        "pusher/iron_bear": Placeholder(color: (0.5, 0.38, 0.28)),
+    },
+)

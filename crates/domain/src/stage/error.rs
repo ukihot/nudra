@@ -1,4 +1,4 @@
-use crate::id::RailId;
+use crate::{id::RailId, math::Vec3};
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum StageError {
@@ -18,4 +18,6 @@ pub enum StageError {
     UnknownReference { kind: &'static str, id: u16 },
     #[error("catapult yaw range is invalid ({min} > {max})")]
     InvalidCatapult { min: f32, max: f32 },
+    #[error("abyss must satisfy min < max on every axis ({min:?}, {max:?})")]
+    InvalidAbyss { min: Vec3, max: Vec3 },
 }

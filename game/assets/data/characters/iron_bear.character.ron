@@ -1,0 +1,2 @@
+// 重いくま。遅いが重いメダルも押し切る。
+(id: "iron_bear", name: "Iron Bear", speed: 1.4, mass: 50.0, push_force: 1200.0, push_width: 2.0, pause_at_ends: 0.6)

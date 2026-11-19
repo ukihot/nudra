@@ -1,0 +1,45 @@
+// 座標: X=左右, Y=上, Z=画面の上下（-Zが奥=画面上）。単位はメートル。
+(
+    id: "stage_01",
+    geometry: (shape: Rectangle(width: 8.0, depth: 16.0), floor_y: 0.0),
+    catapult: (
+        position: (0.0, 0.6, 5.8),
+        base_yaw_deg: 0.0,
+        yaw_range_deg: (-40.0, 40.0),
+        pitch_deg: 12.0,
+        speed: 14.0,
+        cooldown_ms: 250,
+    ),
+    bridges: [
+        (id: 1, entry: (-2.5, 0.0, -13.0), exit: (-2.5, 0.0, -8.0), width: 1.6),
+        (id: 2, entry: (2.5, 0.0, -13.0), exit: (2.5, 0.0, -8.0), width: 1.6),
+    ],
+    abysses: [
+        (min: (-30.0, -20.0, -30.0), max: (30.0, -1.5, 30.0)),
+    ],
+    rails: [
+        (id: 1, points: [(-3.4, 0.0, -1.0), (3.4, 0.0, -1.0)]),
+    ],
+    goals: [
+        (id: 1, position: (0.0, 0.0, 7.4), radius: 1.0),
+    ],
+    initial_medals: [
+        (origin: (0.0, 0.05, -4.2), columns: 12, rows: 7, layers: 3, spacing: (0.6, 0.1, 0.6)),
+    ],
+    waves: [
+        [
+            (at_ms: 1000, enemy: "grunt", bridge: 1, goal: 1),
+            (at_ms: 3000, enemy: "grunt", bridge: 2, goal: 1),
+            (at_ms: 5000, enemy: "grunt", bridge: 1, goal: 1),
+            (at_ms: 7000, enemy: "grunt", bridge: 2, goal: 1),
+        ],
+        [
+            (at_ms: 1000, enemy: "grunt", bridge: 1, goal: 1),
+            (at_ms: 1500, enemy: "grunt", bridge: 2, goal: 1),
+            (at_ms: 2500, enemy: "brute", bridge: 1, goal: 1),
+            (at_ms: 3500, enemy: "grunt", bridge: 2, goal: 1),
+            (at_ms: 4000, enemy: "grunt", bridge: 1, goal: 1),
+            (at_ms: 5000, enemy: "grunt", bridge: 2, goal: 1),
+        ],
+    ],
+)

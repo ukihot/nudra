@@ -2789,7 +2789,7 @@ dependencies = [
 name = "domain"
 version = "0.1.0"
 dependencies = [
- "glam 0.34.3",
+ "glam 0.33.12",
  "proptest",
  "rstest",
  "thiserror 2.0.21",
@@ -3128,6 +3128,7 @@ dependencies = [
  "bevy",
  "domain",
  "ron",
+ "rstest",
  "serde",
  "thiserror 2.0.21",
 ]

@@ -4,6 +4,9 @@ edition.workspace = true
 version.workspace = true
 rust-version.workspace = true
 
+[lib]
+path = "src/lib.rs"
+
 [[bin]]
 name = "nudra"
 path = "src/main.rs"
@@ -17,6 +20,9 @@ thiserror.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 ron.workspace = true
+
+[dev-dependencies]
+rstest.workspace = true
 
 [lints]
 workspace = true
