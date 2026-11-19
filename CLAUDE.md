@@ -18,12 +18,37 @@
   `Positive`。0が有効な値（速度・摩擦・反発係数など）には使わない。積は `checked_mul`。
 - メダル・敵・Pusherの位置や速度はECS（Avian）が正本。Domainに二重に持たない。
 - 外側への指示（射出・出現など）はユースケースの戻り値で返す。出力ポートtraitは作らない。
+- game crate の依存性逆転は Bevy 流（基本設計 5.6）。Infrastructure と Presentation は互いを参照せず、
+  `game/src/port.rs` の Message・読み取り専用Resource・Component だけで連携する。ユースケースを呼ぶのはInfrastructureだけ。
+- 見た目は Infrastructure が `Appearance`（key + 仮形状）で指定し、Presentation が `visuals.visuals.ron` で解決する。
+  アセットの差し替えはこの定義ファイルの書き換えで行い、コードを変えない。
+
+## オフラインファーストの鉄則
+
+- ゲームプレイはネットワーク・ユーザー認証・外部サーバーに依存しない。ローカルのセーブファイルが唯一の正本（基本設計 5.7）。
+- セーブは serde + postcard のバイナリ。ヘッダー（マジック・版・長さ・CRC32）付き。
+- 保存形式（`SaveV1` …）はリリース後に変更しない。変更するときは新しい版の構造体と移行処理を足し、
+  版1のゴールデンテスト（固定バイト列）は消さない。未来の版のファイルは読み取り専用にして上書きしない。
+- 保存は「一時ファイル → 同期 → 現行を `.bak` へ → 置き換え」。読めないファイルは `.corrupt` へ隔離して `.bak` から復旧。
+- 読込時は必ず Domain の検証付き生成（`PlayerProgress::restore` など）を通す。
+- 保存・読込の失敗でゲームを止めない（記録はメモリに保持し、警告ログ）。
+- テストは実ユーザーのデータ領域へ書かない。`FileProgressRepository::in_dir(一時ディレクトリ)` を差し込む。
+
+## Presentation の文字列の鉄則
+
+- Presentation 層（`game/src/presentation*`）に文字列リテラルを書かない。`game/tests/presentation_text.rs` が検査する。
+- 表示文は `game/locales/<言語>/ui.json`（bevy-intl のカタログ）に書き、`I18nText` で表示する。
+- 翻訳キー（`Ui`）・引数名（`Arg`）・言語コード・アセットのパスは `presentation/keys.rs` だけに置く。
+- 表示文を足すときは: `Ui` にバリアントを足す → `Ui::ALL` に足す → **全言語**のカタログに同じキーと同じ `{{引数}}` を足す。
+- カタログは `bundle-only` でビルド時に埋め込まれる（場所は `.cargo/config.toml` の `BEVY_INTL_MESSAGES_DIR`）。
 
 ## エラーの鉄則
 
 - domain: 集約・操作ごとの thiserror enum。巨大な `DomainError` は作らない。テストのため `PartialEq` を付ける。
 - application: ユースケースごとの thiserror enum。domainのErrorは `#[error(transparent)]` + `#[from]` で包む。
 - game: 文脈付けは `anyhow::Context`。`?` で `BevyError` へ。回復動作が要る失敗は `pipe` で受ける。
+- Bevy 0.20 の prelude は `ContextExt`（`.context()`）を含み `anyhow::Context` と衝突する。
+  anyhow で文脈を付けるファイルでは `bevy::prelude::*` を glob で読み込まず、個別に import する。
 - 「操作の拒否」（クールダウン中の射出など）は型付きErrorだが、`?` でエラーハンドラへ流さず `match` する。
 - 物理由来の結果（落下・到達）はエラーにしない。遅れて届いた結果は無視する。
 - `unwrap()` 禁止。`expect("理由")` は不変条件上起こり得ない場合だけ。
@@ -61,7 +86,8 @@ cargo clippy -p domain -p application --all-targets    # 警告ゼロ
 cargo nextest run -p domain -p application             # 全件GREEN
 ```
 
-game crateを触ったときは `-p game` も加える（Bevyのビルドが入るため時間がかかる）。
+game crateを触ったときは `-p game` も加える。Bevyのビルドで数分かかるため、ツールのタイムアウトに注意してバックグラウンドで実行する。
+glam のバージョンは bevy_math と同じにする（`cargo tree -i glam` で1つだけであることを確認）。ずれると `Vec3` が別の型になる。
 
 ## スタイル
 

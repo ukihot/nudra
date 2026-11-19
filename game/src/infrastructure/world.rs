@@ -185,7 +185,11 @@ fn medal_bundle(medal: MedalType, spec: &MedalSpec, transform: Transform) -> imp
 }
 
 pub fn spawn_initial_medals(commands: &mut Commands, stage: &Stage, spec: &MedalSpec) {
-    for p in stage.initial_medals().iter().flat_map(|placement| placement.positions()) {
+    for p in stage
+        .initial_medals()
+        .iter()
+        .flat_map(|placement| placement.positions())
+    {
         commands.spawn(medal_bundle(MedalType::Normal, spec, Transform::from_translation(p)));
     }
 }
@@ -197,14 +201,23 @@ pub fn spawn_launched_medal(commands: &mut Commands, plan: &LaunchPlan) {
     ));
 }
 
-pub fn spawn_enemy(commands: &mut Commands, id: EnemyId, key: String, spec: &EnemySpec, route: Route) {
+pub fn spawn_enemy(
+    commands: &mut Commands,
+    id: EnemyId,
+    key: String,
+    spec: &EnemySpec,
+    route: Route,
+) {
     let (radius, height) = (spec.radius.get(), spec.height.get());
     let length = (height - radius * 2.0).max(0.0);
     let start = route.start() + Vec3::Y * height / 2.0;
     commands.spawn((
         Enemy { id },
         Navigation(route),
-        Walker { max_speed: spec.max_speed, walk_force: spec.walk_force },
+        Walker {
+            max_speed: spec.max_speed,
+            walk_force: spec.walk_force,
+        },
         Appearance::new(key, Silhouette::Capsule { radius, length }),
         RigidBody::Dynamic,
         Collider::capsule(radius, length),
@@ -232,7 +245,11 @@ pub fn spawn_pusher(
         .map(|d| Vec3::new(d.x, 0.0, d.z).normalize_or(Vec3::X))
         .unwrap_or(Vec3::X);
     let floor_y = stage.geometry().floor_y;
-    let position = Vec3::new(setup.position.x, floor_y + PUSHER_HEIGHT / 2.0 + 0.02, setup.position.z);
+    let position = Vec3::new(
+        setup.position.x,
+        floor_y + PUSHER_HEIGHT / 2.0 + 0.02,
+        setup.position.z,
+    );
     commands.spawn((
         Pusher { stats },
         PusherMotion { rail: setup.rail, state: setup.motion },
@@ -243,7 +260,8 @@ pub fn spawn_pusher(
         Friction::new(0.2),
         LockedAxes::ROTATION_LOCKED.lock_translation_y(),
         layers(Layer::Pusher),
-        Transform::from_translation(position).with_rotation(Quat::from_rotation_arc(Vec3::X, heading)),
+        Transform::from_translation(position)
+            .with_rotation(Quat::from_rotation_arc(Vec3::X, heading)),
         in_game(),
     ));
 }

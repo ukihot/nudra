@@ -6,6 +6,7 @@ pub mod launch;
 pub mod math;
 pub mod navigation;
 pub mod positive;
+pub mod progress;
 pub mod pusher;
 pub mod repository;
 pub mod session;

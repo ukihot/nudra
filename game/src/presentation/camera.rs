@@ -29,7 +29,11 @@ fn spawn_camera_and_light(mut commands: Commands) {
         Transform::from_translation(CAMERA_POSITION).looking_at(CAMERA_TARGET, Vec3::Y),
     ));
     commands.spawn((
-        DirectionalLight { illuminance: 7_000.0, shadow_maps_enabled: true, ..default() },
+        DirectionalLight {
+            illuminance: 7_000.0,
+            shadow_maps_enabled: true,
+            ..default()
+        },
         Transform::from_xyz(-6.0, 14.0, 8.0).looking_at(Vec3::ZERO, Vec3::Y),
     ));
 }

@@ -21,6 +21,12 @@ ron = "0.12"
 rstest = "0.28"
 proptest = "1.12"
 mockall = "0.15"
+postcard = { version = "1.1", default-features = false, features = ["use-std"] }
+crc32fast = "1.5"
+dirs = "7"
+tempfile = "3"
+serde_json = "1"
+bevy-intl = { git = "https://github.com/DelsarteAdam/bevy-intl", branch = "master", features = ["bundle-only"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

@@ -8,6 +8,7 @@ use bevy::{prelude::*, state::app::StatesPlugin, time::TimeUpdateStrategy};
 use domain::{event::DomainEvent, id::PusherCharacterId};
 use game::{
     infrastructure::{
+        save::{FileProgressRepository, decode},
         session::ActiveSession,
         world::{Enemy, MedalKind, Pusher},
     },
@@ -27,8 +28,21 @@ fn record(mut messages: MessageReader<DomainEventMsg>, mut recorded: ResMut<Reco
     recorded.0.extend(messages.read().map(|m| m.0.clone()));
 }
 
+/// テストの間だけ存在するセーブ先。Appと一緒に破棄される。
+#[derive(Resource)]
+struct TempSaveDir {
+    _dir: tempfile::TempDir,
+}
+
 fn app() -> App {
+    app_with_save_dir(tempfile::tempdir().expect("temp dir"))
+}
+
+/// 実ユーザーのデータ領域へ書かないよう、セーブ先を必ず一時ディレクトリにする。
+fn app_with_save_dir(dir: tempfile::TempDir) -> App {
     let mut app = App::new();
+    app.insert_resource(FileProgressRepository::in_dir(dir.path()))
+        .insert_resource(TempSaveDir { _dir: dir });
     app.add_plugins((
         MinimalPlugins,
         StatesPlugin,
@@ -60,7 +74,10 @@ fn state(app: &App) -> AppState {
 }
 
 fn count<C: Component>(app: &mut App) -> usize {
-    app.world_mut().query_filtered::<(), With<C>>().iter(app.world()).count()
+    app.world_mut()
+        .query_filtered::<(), With<C>>()
+        .iter(app.world())
+        .count()
 }
 
 fn recorded(app: &App) -> &[DomainEvent] {
@@ -70,7 +87,8 @@ fn recorded(app: &App) -> &[DomainEvent] {
 fn started() -> App {
     let mut app = app();
     run_until(&mut app, 3000, |a| state(a) == AppState::CharacterSelect);
-    app.world_mut().write_message(StartRequested { character: PusherCharacterId::new("mop_rabbit") });
+    app.world_mut()
+        .write_message(StartRequested { character: PusherCharacterId::new("mop_rabbit") });
     run_until(&mut app, 10, |a| {
         state(a) == AppState::InGame && a.world().contains_resource::<ActiveSession>()
     });
@@ -80,7 +98,11 @@ fn started() -> App {
 /// 最初の敵が出現するまで進め、そのEntityを返す。
 fn first_enemy(app: &mut App) -> Entity {
     run_until(app, 200, |a| count::<Enemy>(a) > 0);
-    app.world_mut().query_filtered::<Entity, With<Enemy>>().iter(app.world()).next().expect("enemy")
+    app.world_mut()
+        .query_filtered::<Entity, With<Enemy>>()
+        .iter(app.world())
+        .next()
+        .expect("enemy")
 }
 
 fn teleport(app: &mut App, entity: Entity, to: Vec3) {
@@ -103,7 +125,10 @@ fn start_builds_the_stage_from_data() {
     app.update();
     assert_eq!(count::<MedalKind>(&mut app), INITIAL_MEDALS);
     assert_eq!(count::<Pusher>(&mut app), 1);
-    assert!(matches!(recorded(&app).first(), Some(DomainEvent::GameStarted { .. })));
+    assert!(matches!(
+        recorded(&app).first(),
+        Some(DomainEvent::GameStarted { .. })
+    ));
 }
 
 #[test]
@@ -116,8 +141,14 @@ fn launch_request_spawns_one_medal_per_cooldown() {
     app.world_mut().write_message(LaunchRequested);
     app.update();
 
-    assert_eq!(count::<MedalKind>(&mut app), before + 1, "second request hits the cooldown");
-    let launched = recorded(&app).iter().filter(|e| matches!(e, DomainEvent::MedalLaunched { .. }));
+    assert_eq!(
+        count::<MedalKind>(&mut app),
+        before + 1,
+        "second request hits the cooldown"
+    );
+    let launched = recorded(&app)
+        .iter()
+        .filter(|e| matches!(e, DomainEvent::MedalLaunched { .. }));
     assert_eq!(launched.count(), 1);
 }
 
@@ -147,7 +178,11 @@ fn enemy_reaching_goal_loses_the_game() {
         app.world().get_resource::<GameResult>(),
         Some(GameResult::Lost { enemy, .. }) if *enemy == id
     ));
-    assert!(recorded(&app).iter().any(|e| matches!(e, DomainEvent::GameLost { .. })));
+    assert!(
+        recorded(&app)
+            .iter()
+            .any(|e| matches!(e, DomainEvent::GameLost { .. }))
+    );
 }
 
 #[test]
@@ -163,6 +198,64 @@ fn launch_in_the_losing_tick_is_rejected() {
     app.world_mut().write_message(LaunchRequested);
     app.update();
 
-    assert!(recorded(&app).iter().any(|e| matches!(e, DomainEvent::GameLost { .. })));
+    assert!(
+        recorded(&app)
+            .iter()
+            .any(|e| matches!(e, DomainEvent::GameLost { .. }))
+    );
     assert_eq!(count::<MedalKind>(&mut app), medals);
+}
+
+// ── セーブデータ（オフラインファースト） ──
+
+fn saved(app: &App) -> domain::progress::PlayerProgress {
+    let path = app
+        .world()
+        .resource::<FileProgressRepository>()
+        .path()
+        .to_owned();
+    decode(&std::fs::read(path).expect("save file exists")).expect("valid save")
+}
+
+#[test]
+fn selected_character_is_saved_locally() {
+    let app = started();
+    assert_eq!(
+        saved(&app).last_character(),
+        Some(&PusherCharacterId::new("mop_rabbit"))
+    );
+}
+
+#[test]
+fn game_over_is_saved_locally() {
+    let mut app = started();
+    let enemy = first_enemy(&mut app);
+    teleport(&mut app, enemy, Vec3::new(0.0, 0.45, 7.4));
+    run_until(&mut app, 20, |a| state(a) == AppState::Result);
+
+    let progress = saved(&app);
+    assert_eq!(progress.games_played(), 1);
+    let record = progress
+        .record(&domain::id::StageId::new("stage_01"))
+        .expect("recorded");
+    assert_eq!(record.plays(), 1);
+    assert!(matches!(
+        app.world().get_resource::<GameResult>(),
+        Some(GameResult::Lost { new_record: true, .. })
+    ));
+}
+
+#[test]
+fn broken_save_does_not_block_play() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(dir.path().join("progress.sav"), b"not a save file").expect("write");
+    let mut app = app_with_save_dir(dir);
+    run_until(&mut app, 3000, |a| state(a) == AppState::CharacterSelect);
+    app.world_mut()
+        .write_message(StartRequested { character: PusherCharacterId::new("iron_bear") });
+    run_until(&mut app, 10, |a| state(a) == AppState::InGame);
+    assert_eq!(
+        saved(&app).last_character(),
+        Some(&PusherCharacterId::new("iron_bear"))
+    );
 }

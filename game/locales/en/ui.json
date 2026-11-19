@@ -1,0 +1,12 @@
+{
+  "title": "NUDRA",
+  "choose_pusher": "Choose your Pusher",
+  "character_entry": "{{index}}  {{name}}",
+  "hud": "WAVE {{wave}}\nENEMIES {{enemies}}\nDEFEATED {{defeated}}\nLV {{level}}",
+  "controls": "A/D or ←/→: aim\nSpace / click / tap: launch",
+  "game_over": "GAME OVER",
+  "defeated": "Defeated {{defeated}}",
+  "best_record": "Best {{best}}",
+  "new_record": "NEW RECORD!  Best {{best}}",
+  "continue": "Click or press Enter"
+}

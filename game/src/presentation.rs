@@ -5,12 +5,20 @@ mod camera;
 mod feedback;
 mod hud;
 mod input;
+pub mod keys;
 mod select;
 mod visuals;
 
 use bevy::prelude::*;
+use bevy_intl::{I18nConfig, I18nPlugin};
 
 pub(crate) fn plugin(app: &mut App) {
+    // 表示文はロケールのカタログ（game/locales）にあり、bundle-only でバイナリへ埋め込まれる
+    app.add_plugins(I18nPlugin::with_config(I18nConfig {
+        default_lang: keys::DEFAULT_LANG.to_owned(),
+        fallback_lang: keys::FALLBACK_LANG.to_owned(),
+        ..default()
+    }));
     app.add_plugins((
         camera::plugin,
         visuals::plugin,

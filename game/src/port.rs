@@ -74,7 +74,14 @@ pub struct AimModel {
 /// 直近のゲーム結果。
 #[derive(Resource, Debug, Clone, Copy, PartialEq)]
 pub enum GameResult {
-    Lost { enemy: EnemyId, goal: GoalId },
+    Lost {
+        enemy: EnemyId,
+        goal: GoalId,
+        defeated: u32,
+        /// このステージの最多撃破数（今回を含む）
+        best_defeated: u32,
+        new_record: bool,
+    },
 }
 
 // ── 見た目の指定 ──────────────────────────────────────────
@@ -83,10 +90,18 @@ pub enum GameResult {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Silhouette {
     /// Y軸方向の円柱
-    Cylinder { radius: f32, height: f32 },
-    Cuboid { size: Vec3 },
+    Cylinder {
+        radius: f32,
+        height: f32,
+    },
+    Cuboid {
+        size: Vec3,
+    },
     /// Y軸方向のカプセル（`length` は円柱部分の長さ）
-    Capsule { radius: f32, length: f32 },
+    Capsule {
+        radius: f32,
+        length: f32,
+    },
 }
 
 impl Silhouette {

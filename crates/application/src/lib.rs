@@ -3,12 +3,16 @@
 
 mod launch_medal;
 mod level_up;
+mod progress;
 mod resolve;
 mod start_game;
 mod waves;
 
 pub use launch_medal::{LaunchMedalError, LaunchOutput, launch_medal};
 pub use level_up::{LevelUpOutput, level_up};
+pub use progress::{
+    ProgressStoreError, RecordResultError, load_progress, record_result, save_progress,
+};
 pub use resolve::{PhysicsFact, resolve_physics};
 pub use start_game::{PusherSetup, StartGameCommand, StartGameError, StartGameOutput, start_game};
 pub use waves::{WaveOutput, advance_waves};

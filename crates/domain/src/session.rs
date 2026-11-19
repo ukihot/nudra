@@ -67,6 +67,8 @@ pub struct GameSession {
     /// 退場の二重判定を防ぐためのID集合。位置などの物理状態は持たない。
     alive_enemies: HashSet<EnemyId>,
     next_enemy_id: u64,
+    /// 撃破数（セーブの記録に使う）
+    defeated: u32,
 }
 
 impl GameSession {
@@ -84,6 +86,7 @@ impl GameSession {
             level: LevelProgress::initial(),
             alive_enemies: HashSet::new(),
             next_enemy_id: 1,
+            defeated: 0,
         };
         let event = DomainEvent::GameStarted {
             session: id,
@@ -113,6 +116,9 @@ impl GameSession {
     }
     pub fn alive_enemy_count(&self) -> usize {
         self.alive_enemies.len()
+    }
+    pub fn defeated(&self) -> u32 {
+        self.defeated
     }
 
     pub fn ensure_playing(&self) -> Result<(), GameSessionError> {
@@ -168,8 +174,11 @@ impl GameSession {
 
     /// 物理由来の結果。終了後・退場済みの敵は正常な遅れとして無視する（G3, G4）。
     pub fn enemy_fell(&mut self, enemy: EnemyId) -> Option<DomainEvent> {
-        (self.ensure_playing().is_ok() && self.alive_enemies.remove(&enemy))
-            .then_some(DomainEvent::EnemyDefeated { enemy })
+        if self.ensure_playing().is_err() || !self.alive_enemies.remove(&enemy) {
+            return None;
+        }
+        self.defeated = self.defeated.saturating_add(1);
+        Some(DomainEvent::EnemyDefeated { enemy })
     }
 
     /// Goal到達。成立すると同じ呼び出しの中でLostへ遷移する（G2）。
@@ -470,6 +479,19 @@ mod tests {
     enum Op {
         Fell(u64),
         Goal(u64),
+    }
+
+    #[rstest]
+    fn defeated_counts_each_enemy_once(started: (GameSession, Stage)) {
+        let (mut session, stage) = started;
+        assert_eq!(session.defeated(), 0);
+        session.tick(&stage, Duration::from_secs(1));
+        session.enemy_fell(EnemyId(1));
+        session.enemy_fell(EnemyId(1));
+        session.enemy_fell(EnemyId(99));
+        assert_eq!(session.defeated(), 1);
+        session.enemy_fell(EnemyId(2));
+        assert_eq!(session.defeated(), 2);
     }
 
     proptest! {

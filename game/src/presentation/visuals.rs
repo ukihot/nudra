@@ -11,12 +11,11 @@ use std::collections::HashMap;
 use bevy::prelude::*;
 use serde::Deserialize;
 
+use super::keys;
 use crate::{
     port::{Appearance, Silhouette},
     ron_asset,
 };
-
-const MANIFEST: &str = "visuals.visuals.ron";
 
 #[derive(Asset, TypePath, Deserialize, Debug)]
 pub struct VisualManifest {
@@ -52,7 +51,7 @@ struct Billboard {
 }
 
 pub(super) fn plugin(app: &mut App) {
-    ron_asset::register::<VisualManifest>(app, &["visuals.ron"]);
+    ron_asset::register::<VisualManifest>(app, keys::VISUAL_MANIFEST_EXTENSIONS);
     app.init_resource::<Cache>()
         .add_systems(Startup, load_manifest)
         .add_observer(attach_visual)
@@ -60,7 +59,7 @@ pub(super) fn plugin(app: &mut App) {
 }
 
 fn load_manifest(mut commands: Commands, server: Res<AssetServer>) {
-    commands.insert_resource(Manifest(server.load(MANIFEST)));
+    commands.insert_resource(Manifest(server.load(keys::VISUAL_MANIFEST)));
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -76,10 +75,17 @@ fn attach_visual(
     mut commands: Commands,
 ) {
     let entity = add.entity;
-    let Ok(appearance) = appearances.get(entity) else { return };
+    let Ok(appearance) = appearances.get(entity) else {
+        return;
+    };
     let look = manifest
         .and_then(|m| manifests.get(&m.0))
-        .map(|m| m.entries.get(appearance.key.as_ref()).unwrap_or(&m.default).clone())
+        .map(|m| {
+            m.entries
+                .get(appearance.key.as_ref())
+                .unwrap_or(&m.default)
+                .clone()
+        })
         .unwrap_or(FALLBACK);
 
     match look {
@@ -100,12 +106,16 @@ fn attach_visual(
                     })
                 })
                 .clone();
-            commands.entity(entity).insert((Mesh3d(mesh), MeshMaterial3d(material)));
+            commands
+                .entity(entity)
+                .insert((Mesh3d(mesh), MeshMaterial3d(material)));
         },
         Look::Billboard { image, height } => {
             let mesh = cache
                 .meshes
-                .entry(silhouette_key(Silhouette::Cuboid { size: Vec3::new(height, height, 0.0) }))
+                .entry(silhouette_key(Silhouette::Cuboid {
+                    size: Vec3::new(height, height, 0.0),
+                }))
                 .or_insert_with(|| meshes.add(Rectangle::new(height, height)))
                 .clone();
             let material = cache
@@ -131,7 +141,9 @@ fn attach_visual(
             ));
         },
         Look::Model { scene } => {
-            commands.entity(entity).with_child(WorldAssetRoot(server.load(scene)));
+            commands
+                .entity(entity)
+                .with_child(WorldAssetRoot(server.load(scene)));
         },
     }
 }
@@ -159,9 +171,13 @@ fn face_camera(
     parents: Query<&Transform, Without<Billboard>>,
     mut billboards: Query<(&Billboard, &ChildOf, &mut Transform)>,
 ) {
-    let Ok(camera) = camera.single() else { return };
+    let Ok(camera) = camera.single() else {
+        return;
+    };
     for (billboard, child_of, mut transform) in &mut billboards {
-        let Ok(parent) = parents.get(child_of.parent()) else { continue };
+        let Ok(parent) = parents.get(child_of.parent()) else {
+            continue;
+        };
         let inverse = parent.rotation.inverse();
         transform.rotation = inverse * camera.rotation;
         transform.translation = inverse * (Vec3::Y * billboard.lift);

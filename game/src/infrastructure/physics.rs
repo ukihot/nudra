@@ -5,7 +5,9 @@ use avian3d::{dynamics::rigid_body::forces::ForcesItem, prelude::*};
 use bevy::prelude::*;
 use domain::{id::EnemyId, pusher::MovementPattern, stage::Rail};
 
-use super::world::{AbyssZone, Enemy, GoalZone, MedalKind, Navigation, Pusher, PusherMotion, Walker};
+use super::world::{
+    AbyssZone, Enemy, GoalZone, MedalKind, Navigation, Pusher, PusherMotion, Walker,
+};
 
 /// 衝突レイヤー。組み合わせは [`layers`] で定義する。
 #[derive(PhysicsLayer, Default, Clone, Copy, Debug)]
@@ -34,7 +36,12 @@ pub fn layers(layer: Layer) -> CollisionLayers {
         Goal => &[Enemy],
         SpawnFloor => &[Enemy],
     };
-    CollisionLayers::new(layer, filters.iter().fold(LayerMask::NONE, |mask, &l| mask | l))
+    CollisionLayers::new(
+        layer,
+        filters
+            .iter()
+            .fold(LayerMask::NONE, |mask, &l| mask | l),
+    )
 }
 
 // ── 調整ノブ ──────────────────────────────────────────────
@@ -62,10 +69,14 @@ pub fn collect_facts(
 ) {
     for c in collisions.read() {
         for (zone, other) in [(c.collider1, c.collider2), (c.collider2, c.collider1)] {
-            let Ok((is_abyss, goal)) = zones.get(zone) else { continue };
+            let Ok((is_abyss, goal)) = zones.get(zone) else {
+                continue;
+            };
             if let Ok(enemy) = enemies.get(other) {
                 match goal {
-                    Some(goal) => facts.0.push(PhysicsFact::EnemyEnteredGoal(enemy.id, goal.0)),
+                    Some(goal) => facts
+                        .0
+                        .push(PhysicsFact::EnemyEnteredGoal(enemy.id, goal.0)),
                     None if is_abyss => facts.0.push(PhysicsFact::EnemyEnteredAbyss(enemy.id)),
                     None => {},
                 }
@@ -92,7 +103,11 @@ pub struct KillPlane(pub f32);
 #[derive(Resource, Debug, Default)]
 pub struct PendingFacts(pub Vec<PhysicsFact>);
 
-pub fn despawn_enemies(defeated: &[EnemyId], enemies: &Query<(Entity, &Enemy)>, commands: &mut Commands) {
+pub fn despawn_enemies(
+    defeated: &[EnemyId],
+    enemies: &Query<(Entity, &Enemy)>,
+    commands: &mut Commands,
+) {
     for (entity, enemy) in enemies {
         if defeated.contains(&enemy.id) {
             commands.entity(entity).try_despawn();
@@ -126,11 +141,14 @@ pub fn drive_pusher(
     let flat = |v: Vec3| Vec3::new(v.x, 0.0, v.z);
     // 押し負けて離されたら目標点を止め、追いつくのを待つ
     if flat(motion.state.target(rail) - position).length() < PUSHER_MAX_LEAD {
-        motion.state = motion.state.advance(rail, pattern, pusher.stats.speed.get(), dt);
+        motion.state = motion
+            .state
+            .advance(rail, pattern, pusher.stats.speed.get(), dt);
     }
     let error = flat(motion.state.target(rail) - position);
     let damping = 2.0 * PUSHER_STIFFNESS.sqrt();
     let acceleration = error * PUSHER_STIFFNESS - flat(forces.linear_velocity()) * damping;
-    let force = (acceleration * pusher.stats.mass.get()).clamp_length_max(pusher.stats.push_force.get());
+    let force =
+        (acceleration * pusher.stats.mass.get()).clamp_length_max(pusher.stats.push_force.get());
     forces.apply_force(force);
 }

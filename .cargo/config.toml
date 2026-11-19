@@ -1,0 +1,4 @@
+# bevy-intl（bundle-only）は翻訳カタログをビルド時にバイナリへ埋め込む。
+# その場所をビルドスクリプトへ伝える（relative = true でこのファイルの親フォルダからの絶対パスになる）。
+[env]
+BEVY_INTL_MESSAGES_DIR = { value = "game/locales", relative = true }

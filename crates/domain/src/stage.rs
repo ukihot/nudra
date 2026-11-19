@@ -205,8 +205,7 @@ pub(crate) mod fixture {
     use rstest::fixture;
 
     use super::*;
-    use crate::id::EnemyTypeId;
-    use crate::positive::fixture::p;
+    use crate::{id::EnemyTypeId, positive::fixture::p};
 
     #[fixture]
     pub fn parts() -> StageParts {
@@ -321,10 +320,14 @@ mod tests {
 
     #[rstest]
     fn abyss_exposes_center_and_size() {
-        let abyss = Abyss::new(Vec3::new(-2.0, -10.0, 0.0), Vec3::new(2.0, -2.0, 6.0)).expect("valid");
+        let abyss =
+            Abyss::new(Vec3::new(-2.0, -10.0, 0.0), Vec3::new(2.0, -2.0, 6.0)).expect("valid");
         assert_eq!(abyss.center(), Vec3::new(0.0, -6.0, 3.0));
         assert_eq!(abyss.size(), Vec3::new(4.0, 8.0, 6.0));
-        assert_eq!((abyss.min(), abyss.max()), (Vec3::new(-2.0, -10.0, 0.0), Vec3::new(2.0, -2.0, 6.0)));
+        assert_eq!(
+            (abyss.min(), abyss.max()),
+            (Vec3::new(-2.0, -10.0, 0.0), Vec3::new(2.0, -2.0, 6.0))
+        );
     }
 
     #[rstest]

@@ -4,8 +4,8 @@
 use std::{collections::HashMap, time::Duration};
 
 use anyhow::{Context, bail};
-// Bevy 0.20 の prelude は `ContextExt`（`.context()`）を含み `anyhow::Context` と衝突するため、
-// anyhow で文脈を付けるこのファイルでは prelude を glob で読み込まない。
+// Bevy 0.20 の prelude は `ContextExt`（`.context()`）を含み `anyhow::Context`
+// と衝突するため、 anyhow で文脈を付けるこのファイルでは prelude を glob で読み込まない。
 use bevy::{
     asset::{LoadState, LoadedFolder, RecursiveDependencyLoadState},
     prelude::{
@@ -232,7 +232,11 @@ impl StageAsset {
                 .goals
                 .iter()
                 .map(|g| {
-                    Ok(Goal { id: GoalId(g.id), position: v(g.position), radius: pos(g.radius)? })
+                    Ok(Goal {
+                        id: GoalId(g.id),
+                        position: v(g.position),
+                        radius: pos(g.radius)?,
+                    })
                 })
                 .collect::<Result<_, DataError>>()?,
             initial_medals: self
@@ -384,10 +388,13 @@ pub(super) fn plugin(app: &mut App) {
     ron_asset::register::<StageAsset>(app, &["stage.ron"]);
     ron_asset::register::<CharacterAsset>(app, &["character.ron"]);
     ron_asset::register::<SpecsAsset>(app, &["specs.ron"]);
-    app.add_systems(OnEnter(AppState::Loading), start_loading).add_systems(
-        Update,
-        finish_loading.pipe(exit_on_error).run_if(in_state(AppState::Loading)),
-    );
+    app.add_systems(OnEnter(AppState::Loading), start_loading)
+        .add_systems(
+            Update,
+            finish_loading
+                .pipe(exit_on_error)
+                .run_if(in_state(AppState::Loading)),
+        );
 }
 
 fn start_loading(mut commands: Commands, server: Res<AssetServer>) {
@@ -411,16 +418,25 @@ fn finish_loading(
     specs_assets: Res<Assets<SpecsAsset>>,
     mut next: ResMut<NextState<AppState>>,
 ) -> anyhow::Result<()> {
-    let ids = [handles.stages.id().untyped(), handles.characters.id().untyped(), handles.specs.id().untyped()];
+    let ids = [
+        handles.stages.id().untyped(),
+        handles.characters.id().untyped(),
+        handles.specs.id().untyped(),
+    ];
     for id in ids {
         if let LoadState::Failed(err) = server.load_state(id) {
             bail!("failed to load {:?}: {err}", server.get_path(id));
         }
-        if let RecursiveDependencyLoadState::Failed(err) = server.recursive_dependency_load_state(id) {
+        if let RecursiveDependencyLoadState::Failed(err) =
+            server.recursive_dependency_load_state(id)
+        {
             bail!("failed to load a file under {:?}: {err}", server.get_path(id));
         }
     }
-    if !ids.iter().all(|&id| server.is_loaded_with_dependencies(id)) {
+    if !ids
+        .iter()
+        .all(|&id| server.is_loaded_with_dependencies(id))
+    {
         return Ok(());
     }
 
@@ -432,19 +448,27 @@ fn finish_loading(
 
     let mut stages = StageCatalog::default();
     for handle in &folder(&folders, &handles.stages)?.handles {
-        let path = handle.path().map(ToString::to_string).unwrap_or_default();
+        let path = handle
+            .path()
+            .map(ToString::to_string)
+            .unwrap_or_default();
         let stage = stage_assets
             .get(&handle.clone().typed::<StageAsset>())
             .with_context(|| format!("{path} is not a stage asset"))?
             .to_domain()
             .with_context(|| format!("invalid stage data: {path}"))?;
-        specs.check_stage(&stage).with_context(|| format!("invalid stage data: {path}"))?;
+        specs
+            .check_stage(&stage)
+            .with_context(|| format!("invalid stage data: {path}"))?;
         stages.0.insert(stage.id().clone(), stage);
     }
 
     let mut characters = CharacterCatalog::default();
     for handle in &folder(&folders, &handles.characters)?.handles {
-        let path = handle.path().map(ToString::to_string).unwrap_or_default();
+        let path = handle
+            .path()
+            .map(ToString::to_string)
+            .unwrap_or_default();
         let character = character_assets
             .get(&handle.clone().typed::<CharacterAsset>())
             .with_context(|| format!("{path} is not a character asset"))?
@@ -464,7 +488,11 @@ fn finish_loading(
         .collect();
     roster.sort_by(|a, b| a.id.cmp(&b.id));
 
-    info!(stages = stages.0.len(), characters = characters.0.len(), "definition data loaded");
+    info!(
+        stages = stages.0.len(),
+        characters = characters.0.len(),
+        "definition data loaded"
+    );
     commands.insert_resource(CharacterRoster(roster));
     commands.insert_resource(stages);
     commands.insert_resource(characters);

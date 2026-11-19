@@ -477,10 +477,27 @@ pub trait PusherCharacterRepository {
   読込の失敗はLoading時点の技術エラーとして扱う（8章）。
 - 「見つからない」はユースケース側で型付きError（`StageNotFound`）に変換する。
 - `save`（要件14.2）は作らない。ステージの編集機能が無いため。
-- **GameSessionRepositoryは作らない。** 保存・再開の要件が未確定のため（要件14.4、方針13）。
+- **GameSessionRepositoryは作らない。** インゲームの途中保存・再開の要件が無いため（要件14.4、方針13）。
 - 実装はgame crateの`StageCatalog` / `CharacterCatalog`（HashMapを持つResource）。
   applicationのテストでは、テスト内の簡易実装を使う。
-- キャラクター選択画面の一覧表示は、Presentationが`CharacterCatalog`を読み取って行う。
+- キャラクター選択画面の一覧表示は、Infrastructureが読み取りモデル`CharacterRoster`として公開する（5.6）。
+
+### ProgressRepository（セーブデータ）
+
+```rust
+pub trait ProgressRepository {
+    type Error: std::error::Error + Send + Sync + 'static;
+    fn load(&self) -> Result<Option<PlayerProgress>, Self::Error>;
+    fn save(&mut self, progress: &PlayerProgress) -> Result<(), Self::Error>;
+}
+```
+
+- 定義データと違い、ローカル保存は失敗し得るため`Result`を返す。エラー型は実装が関連型で決める。
+- 対象の集約`PlayerProgress`【仮決定】: 最後に選んだキャラクター、総プレイ回数、ステージごとの記録（回数・最多撃破数）。
+  インゲームの成長は持ち越さないため保存しない（要件9.1）。
+- `PlayerProgress::restore`が読込時の値を検証する（記録の回数が0、同じステージの重複、
+  ステージ回数の合計 > 総プレイ回数 を拒否）。
+- 実装と保存形式は5.7。
 
 ---
 
@@ -692,7 +709,9 @@ Pusherの追従の安定性（目標点の先行量の上限、制御ゲイン�
 |---|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
 | **Medal** | ✓ | ✓ | ✓ | ✓ | ✓ | – | – |
 | **Enemy** | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| **Pusher** | ✓ | ✓ | ✓ | – | – | – | – |
+| **Pusher** | – | ✓ | ✓ | – | – | – | – |
+
+PusherはStageと衝突させず、並進Yを固定して床からわずかに浮かせる（床の摩擦で追従が乱れないようにするため）。
 
 - Goalのセンサーは敵だけを検知する。数千枚のメダルとの組み合わせ判定を発生させない。
 - 敵の出現領域の床（SpawnFloor）は敵とだけ衝突させる。
@@ -720,28 +739,83 @@ Pusherの追従の安定性（目標点の先行量の上限、制御ゲイン�
 
 | ファイル | DTO | 変換先（Domain） |
 |---|---|---|
-| `assets/data/stages/*.stage.ron` | `StageAsset` | `Stage`（`Stage::new`で検証） |
-| `assets/data/characters/*.character.ron` | `CharacterAsset` | `PusherCharacter` |
-| `assets/data/specs.ron` | `SpecsAsset` | `SpecCatalog` |
-| 地形・キャラクター・メダルの見た目 | glTF | Presentationが使用 |
+アセットのルートは`game/assets/`（`cargo run`時のBevyの既定位置）。
 
-- DTOはserdeでデシリアライズする。Domainの型にはserdeを付けず、`TryFrom<Dto>`で変換する（方針13）。
-- AssetLoaderは拡張子ごとに用意する（RON → DTO）。Errorはthiserrorで定義する（8.3）。
-- 開発ビルドではBevyのファイル監視（ホットリロード）を有効にする。
-  定義データが変わったらCatalogを再構築し、次のインゲーム開始時に反映する（物理調整の反復を速くするため）。
-- 地形の衝突形状をglTFのメッシュから作るか、Geometryから単純形状で作るかは【要検証】。
-
-## 5.6 Message / Event / Observerの使い分け
-
-| 用途 | 機構 | 型 |
+| ファイル | DTO | 変換先（Domain） |
 |---|---|---|
-| 入力 → 射出要求（Update → FixedUpdate） | Message | `LaunchRequested` |
-| ドメインイベント → UI・演出・音 | Message | `DomainEventMsg(DomainEvent)` |
-| Avianの衝突 → Resolve | Avianが提供するイベントをMessageとして読む | — |
-| UIウィジェット内の反応（ボタン押下など） | Observer | Bevy UIのイベント |
+| `data/stages/*.stage.ron` | `StageAsset` | `Stage`（`Stage::new`で検証） |
+| `data/characters/*.character.ron` | `CharacterAsset` | `PusherCharacter` |
+| `data/game.specs.ron` | `SpecsAsset` | `SpecCatalog` |
+| `visuals.visuals.ron` | `VisualManifest`（Presentation） | —（見た目の割り当て、5.8） |
 
+- DTOはserdeでデシリアライズする。Domainの型にはserdeを付けず、DTOの`to_domain()`で変換する（方針13）。
+- RONの読込は汎用の`RonLoader<A>`で行う（拡張子ごとに登録）。Errorはthiserrorで定義する（8.3）。
+- 【未実装】定義データのホットリロード（Catalogの再構築）。物理調整の反復が増えた時点で追加する。
+- 地形の衝突形状は当面Geometryから単純形状で作る。glTFメッシュ由来にするかは【要検証】。
+
+## 5.6 依存性逆転とMessage / Event / Observerの使い分け
+
+Bevy ECSの流儀で依存性を逆転する。ポートのtraitにDTOを流す代わりに、
+`game/src/port.rs` に置いた **Message・読み取り専用Resource・Component** を境界にする。
+InfrastructureとPresentationは`port`だけに依存し、互いを参照しない。
+
+| 方向 | 種類 | 型 |
+|---|---|---|
+| Presentation → Infrastructure | Message（入力ポート） | `StartRequested` / `AimRequested` / `LaunchRequested` / `LevelUpRequested` / `MenuRequested` |
+| Infrastructure → Presentation | Message（出力ポート） | `DomainEventMsg(DomainEvent)` |
+| Infrastructure → Presentation | 読み取り専用Resource | `CharacterRoster` / `HudModel` / `AimModel` / `GameResult` |
+| Infrastructure → Presentation | Component | `Appearance { key, silhouette }`（何に見えるべきか） |
+| Avianの衝突 → Resolve | Avianの`CollisionStart`をMessageとして読む | — |
+| UIウィジェット内の反応 | Observer（`On<PointerClick>`） | — |
+
+- ユースケース（application）を呼ぶのはInfrastructureのSystemだけ。
 - ゲーム進行（射出・撃破・敗北）をObserverで連鎖させない。処理順序を6章のSystemSetだけで決めるため（方針11）。
 - `DomainEvent`自体はBevyに依存しない値である。game側で1種類のMessageに包んで配る。
+
+## 5.7 セーブデータ（オフラインファースト）
+
+Nudraのゲームプレイは、インターネット接続・ユーザー認証・外部サーバーの稼働状態に依存しない。
+ローカルのセーブファイルが唯一の正本で、通信できない状況でもゲーム進行と記録を維持する。
+オンライン機能は、将来このファイルを同期する**後付けのサービス**として追加する（今は抽象を作らない）。
+
+実装: `game/src/infrastructure/save.rs` の `FileProgressRepository`（`ProgressRepository`の実装）。
+
+| 要件 | 設計 |
+|---|---|
+| シリアライズ | serde。版ごとの保存形式（`SaveV1` …）はDomainと分離し、リリース後は変更しない |
+| バイナリ保存 | postcard（ワイヤー形式が1.0で固定）。ファイル: `"NUDRASAV"(8) \| 版 u16 \| 長さ u32 \| CRC32 u32 \| 本体` |
+| バージョン管理 | 版番号で分岐し、古い版は最新の形へ移行する。未来の版のファイルは**読み取り専用**とし上書きしない。版1の固定バイト列をテストで保持する |
+| 保存失敗への備え | 一時ファイルへ書いて同期 → 現行を`.bak`へ退避 → 一時ファイルを現行へ改名。途中で落ちても現行か`.bak`が残る |
+| 読込時の検証 | マジック → 版 → 長さ（上限1MiB）→ CRC32 → デコード → `PlayerProgress::restore`（Domainの検証） |
+
+- 読めない現行ファイルは`.corrupt`へ隔離し、`.bak`から復旧する（警告ログ）。両方とも読めなければ空の記録で始め、隔離したファイルは残す。
+- 保存先: 環境変数`NUDRA_SAVE_DIR` → OSのユーザーデータ領域`/nudra` → `./save`。
+- 保存の失敗はゲームを止めない。記録はメモリに保持し、次の保存で再試行する（`warn`ログ）。
+- 保存のタイミング: キャラクター選択時、ゲーム終了時。ファイルは数百バイトのため同期I/Oで書く（大きくなったら非同期化）。
+
+## 5.8 2.5Dの外観とアセットの差し替え
+
+- 物理は3D（Avian）のまま、見た目を2.5Dにする。縦長の盤面を急角度（約60°）・狭い画角の固定カメラで見下ろす。
+  画面下（+Z）にカタパルトとGoal、画面上（-Z）の橋から敵が下りてくる。左右の外周は奈落。
+- Infrastructureは見た目を`Appearance`（keyと仮の形状）で指定するだけ。Presentationが
+  `visuals.visuals.ron` でkeyごとの見た目を決める。アセットが揃ったら、この定義ファイルの行を書き換えるだけで差し替わる。
+
+| 見た目 | 用途 |
+|---|---|
+| `Placeholder(color)` | 仮の図形（円柱・箱・カプセル）。同じ形のメッシュとマテリアルは共有する |
+| `Billboard(image, height)` | 2.5D用。カメラを向く板ポリに画像を貼る（転がる物体でもカメラを向く） |
+| `Model(scene)` | glTFシーン |
+
+## 5.9 表示文の国際化（i18n）
+
+- Presentation 層に文字列リテラルを書かない。表示文は bevy-intl のカタログ `game/locales/<言語>/ui.json` に置き、
+  `I18nText` Component で表示する（言語を切り替えると自動で再描画される）。
+- 翻訳キーは enum `Ui`、引数名は enum `Arg` で表し、`presentation/keys.rs` に集約する（Rust 側の打ち間違いをコンパイル時に防ぐ）。
+- カタログとの整合は `game/tests/presentation_text.rs` で検査する: 全言語に `Ui::ALL` のキーが過不足なくある、
+  `{{引数}}` がすべて `Arg::ALL` にある、言語間で `{{引数}}` が一致する、Presentation にリテラルが無い。
+- カタログは `bundle-only` でビルド時にバイナリへ埋め込む（オフラインファーストと整合。場所は `.cargo/config.toml`）。
+- bevy-intl は crates.io の最新版（0.3）が Bevy 0.18 向けのため、Bevy 0.20 対応の master を Git 依存で使う。
+- 【仮決定】既定の言語は英語。日本語のグリフを持つフォントを同梱したら日本語を既定にする。
 
 ---
 
@@ -932,6 +1006,8 @@ pub enum LaunchError {
   ```
 
 - それ以外のSystemやセットアップ処理では、`anyhow::Context`で文脈（どのStageか、どのファイルか）を付けて伝播する。
+- Bevy 0.20 の prelude は `ContextExt`（BevyError向けの `.context()` / `.with_context()`）を含み、`anyhow::Context` と名前が衝突する。
+  anyhow で文脈を付けるファイルでは `bevy::prelude::*` を glob で読み込まず、必要な型を個別に import する。
 
 ### 共通の規約
 
@@ -1145,8 +1221,10 @@ game:
 | 13 | Pusherの数 | 1体 | 要件20.2 |
 | 14 | Pusher・敵の剛体制御 | 力制限付きDynamic | 9.4の検証 |
 | 15 | 地形の衝突形状 | glTFメッシュ由来か単純形状か | 9.4の検証 |
-| 16 | GameSessionRepository | 作らない | 保存・再開の要件 |
+| 16 | GameSessionRepository | 作らない（インゲームの途中保存は無し） | 保存・再開の要件 |
 | 17 | メダル落下の報酬 | Domainへ渡さない | 要件20.1 |
+| 18 | セーブの対象 | 最後のキャラクター・総プレイ回数・ステージごとの記録 | アウトゲームの仕様 |
+| 19 | 2.5Dの外観 | 固定カメラの見下ろし＋Billboard差し替え | アート方針 |
 
 ---
 

@@ -23,20 +23,42 @@
 ```
 crates/
   domain/        ゲームの意味とルール。Bevy・Avianに依存しない純粋なRust
-  application/   ユースケース（start_game / launch_medal / advance_waves / resolve_physics / level_up）
+  application/   ユースケース（開始・射出・Wave・物理結果の判定・成長・進行記録）
 game/            Bevy + Avian。Infrastructure と Presentation（実行バイナリ nudra）
+  assets/        定義データ（data/*.ron）と見た目の定義（visuals.visuals.ron）
+  locales/       表示文のカタログ（ja / en）
 docs/
   requirements.md   要件定義書
   basic-design.md   基本設計書
 ```
 
 依存の向きは `game → application → domain`（と `game → domain`）。domainは外側に依存しません。
+game の中では Infrastructure と Presentation が互いを参照せず、`game/src/port.rs` の Message・Resource だけで連携します。
 
 ## 開発状況
 
-- [x] domain: 集約（Stage / GameSession / PusherCharacter）、定義データ、射出・経路・成長ルール
+- [x] domain: 集約（Stage / GameSession / PusherCharacter / PlayerProgress）、定義データ、射出・経路・成長ルール
 - [x] application: ユースケース一式
-- [ ] game: Bevy・Avianでの実装（現在は空の `main` のみ）
+- [x] セーブ: オフラインファースト（ローカルのバイナリファイル、版管理・バックアップ・読込時検証）
+- [ ] game: Bevy・Avianでの実装（2.5Dの見た目は仮の図形。アセットは未作成）
+
+## オフラインファースト
+
+ゲームはネットワーク・ユーザー認証・外部サーバーに依存しません。進行記録はローカルに保存します。
+
+| OS | 既定の保存先 |
+|---|---|
+| Windows | `%APPDATA%\nudra\progress.sav` |
+| macOS | `~/Library/Application Support/nudra/progress.sav` |
+| その他 | OSのユーザーデータ領域、無ければ `./save` |
+
+環境変数 `NUDRA_SAVE_DIR` で変更できます。直前の保存は `progress.bak`、読めなかったファイルは `progress.corrupt` として残ります。
+
+## 表示文（i18n）
+
+表示文は `game/locales/<言語>/ui.json` に書きます（コードには書きません）。
+文を足すときは `game/src/presentation/keys.rs` の `Ui` にキーを足し、**全言語**のカタログに同じキーを足してください。
+整合は `cargo nextest run -p game -E 'binary(presentation_text)'` で確認できます。
 
 ## セットアップ
 

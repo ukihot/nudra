@@ -7,8 +7,8 @@ use application::{
     start_game,
 };
 use avian3d::prelude::{Forces, Mass};
-// Bevy 0.20 の prelude は `ContextExt`（`.context()`）を含み `anyhow::Context` と衝突するため、
-// anyhow で文脈を付けるこのファイルでは prelude を glob で読み込まない。
+// Bevy 0.20 の prelude は `ContextExt`（`.context()`）を含み `anyhow::Context`
+// と衝突するため、 anyhow で文脈を付けるこのファイルでは prelude を glob で読み込まない。
 use bevy::prelude::{
     App, Commands, Deref, DerefMut, DetectChangesMut, Entity, FixedUpdate, In, IntoScheduleConfigs,
     IntoSystem, MessageReader, MessageWriter, NextState, OnEnter, OnExit, Query, Res, ResMut,
@@ -90,7 +90,9 @@ pub(super) fn plugin(app: &mut App) {
         .add_systems(
             FixedUpdate,
             (
-                (physics::collect_facts, resolve).chain().in_set(Resolve),
+                (physics::collect_facts, resolve)
+                    .chain()
+                    .in_set(Resolve),
                 (aim, launch, apply_level_up).chain().in_set(Command),
                 (spawn_waves, physics::walk_enemies, drive_pushers).in_set(Intent),
             ),
@@ -106,9 +108,16 @@ fn select_character(
     mut commands: Commands,
     mut next: ResMut<NextState<AppState>>,
 ) {
-    let Some(request) = requests.read().last() else { return };
-    let Some(stage) = stages.default_stage() else { return };
-    commands.insert_resource(Selection { stage: stage.clone(), character: request.character.clone() });
+    let Some(request) = requests.read().last() else {
+        return;
+    };
+    let Some(stage) = stages.default_stage() else {
+        return;
+    };
+    commands.insert_resource(Selection {
+        stage: stage.clone(),
+        character: request.character.clone(),
+    });
     next.set(AppState::InGame);
 }
 
@@ -186,7 +195,14 @@ fn resolve(
     mut events: MessageWriter<DomainEventMsg>,
     mut next: ResMut<NextState<AppState>>,
 ) {
-    let _ = (&mut session, &mut facts, &enemies, &mut commands, &mut events, &mut next);
+    let _ = (
+        &mut session,
+        &mut facts,
+        &enemies,
+        &mut commands,
+        &mut events,
+        &mut next,
+    );
     let _: fn(&mut GameSession, &mut Vec<PhysicsFact>) -> Vec<DomainEvent> = resolve_physics;
     todo!()
 }
@@ -214,7 +230,16 @@ fn launch(
     mut commands: Commands,
     mut events: MessageWriter<DomainEventMsg>,
 ) {
-    let _ = (&mut requests, &session, &stage, &mut catapult, &specs, &time, &mut commands, &mut events);
+    let _ = (
+        &mut requests,
+        &session,
+        &stage,
+        &mut catapult,
+        &specs,
+        &time,
+        &mut commands,
+        &mut events,
+    );
     let _ = launch_medal;
     todo!()
 }
@@ -269,7 +294,13 @@ fn spawn_waves(
             error!(?order, "spawn order refers to unknown data");
             continue;
         };
-        world::spawn_enemy(&mut commands, order.enemy, Appearance::enemy_key(&order.kind), spec, route);
+        world::spawn_enemy(
+            &mut commands,
+            order.enemy,
+            Appearance::enemy_key(&order.kind),
+            spec,
+            route,
+        );
     }
     events.write_batch(out.events.into_iter().map(DomainEventMsg));
 }
@@ -281,7 +312,9 @@ fn drive_pushers(
     time: Res<Time>,
 ) {
     for (pusher, mut motion, mut forces) in &mut pushers {
-        let Some(rail) = stage.rail(motion.rail) else { continue };
+        let Some(rail) = stage.rail(motion.rail) else {
+            continue;
+        };
         physics::drive_pusher(
             pusher,
             &mut motion,
@@ -308,5 +341,8 @@ fn publish_models(
         level: session.level().level(),
     });
     let c = stage.catapult();
-    aim.set_if_neq(AimModel { origin: c.position(), direction: c.direction(catapult.yaw()) });
+    aim.set_if_neq(AimModel {
+        origin: c.position(),
+        direction: c.direction(catapult.yaw()),
+    });
 }

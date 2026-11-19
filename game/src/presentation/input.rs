@@ -64,15 +64,19 @@ fn debug_level_up(
     mut requests: MessageWriter<crate::port::LevelUpRequested>,
 ) {
     use domain::{positive::Positive, session::Upgrade, spec::MedalType};
-    let factor = |v| Positive::new(v).expect("constant is positive");
-    let upgrade = if keys.just_pressed(KeyCode::Digit1) {
-        Upgrade::MedalMass { medal: MedalType::Normal, factor: factor(1.5) }
-    } else if keys.just_pressed(KeyCode::Digit2) {
-        Upgrade::PusherSpeed { factor: factor(1.25) }
-    } else if keys.just_pressed(KeyCode::Digit3) {
-        Upgrade::PusherForce { factor: factor(1.5) }
-    } else {
-        return;
-    };
-    requests.write(crate::port::LevelUpRequested(upgrade));
+    let choices: [(KeyCode, f32, fn(Positive) -> Upgrade); 3] = [
+        (KeyCode::Digit1, 1.5, |factor| Upgrade::MedalMass {
+            medal: MedalType::Normal,
+            factor,
+        }),
+        (KeyCode::Digit2, 1.25, |factor| Upgrade::PusherSpeed { factor }),
+        (KeyCode::Digit3, 1.5, |factor| Upgrade::PusherForce { factor }),
+    ];
+    for (key, factor, upgrade) in choices {
+        if keys.just_pressed(key)
+            && let Ok(factor) = Positive::new(factor)
+        {
+            requests.write(crate::port::LevelUpRequested(upgrade(factor)));
+        }
+    }
 }

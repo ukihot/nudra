@@ -1,0 +1,12 @@
+{
+  "title": "NUDRA",
+  "choose_pusher": "Pusherを選んでください",
+  "character_entry": "{{index}}  {{name}}",
+  "hud": "WAVE {{wave}}\n敵 {{enemies}}\n撃破 {{defeated}}\nLV {{level}}",
+  "controls": "A/D・←/→: 照準\nSpace・クリック・タップ: 発射",
+  "game_over": "ゲームオーバー",
+  "defeated": "撃破数 {{defeated}}",
+  "best_record": "最高記録 {{best}}",
+  "new_record": "新記録！  最高記録 {{best}}",
+  "continue": "クリックまたはEnterで戻る"
+}
