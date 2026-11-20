@@ -8,7 +8,8 @@ use crate::{
     event::DomainEvent,
     evolution::{Evolution, EvolutionChoice, EvolutionError, EvolutionGauge, MedalCollection},
     id::{
-        BridgeId, EnemyId, EnemyTypeId, GameSessionId, GoalId, MedalId, PusherCharacterId, StageId,
+        BridgeId, EnemyId, EnemyTypeId, GameSessionId, GoalId, MedalCode, PusherCharacterId,
+        StageId,
     },
     pusher::PusherCharacter,
     random::SessionRng,
@@ -83,7 +84,7 @@ pub struct GameSession {
     /// New! の候補を選ぶ決定的な乱数（セッションのシードから）
     rng: SessionRng,
     /// 進化画面で提示中の New!（ゲージが満タンになった時点で固定する）
-    offer: Option<MedalId>,
+    offer: Option<MedalCode>,
     /// 盤面で直前に発動した能力（デジャヴの再生に使う。再生を含む能力は記録しない）
     last_ability: Option<AbilityRef>,
     /// 退場の二重判定を防ぐためのID集合。位置などの物理状態は持たない。
@@ -152,7 +153,7 @@ impl GameSession {
         &self.gauge
     }
     /// 進化画面の New! に提示中の、未所持の素材メダル（全部持っていれば `None`）。
-    pub fn evolution_offer(&self) -> Option<&MedalId> {
+    pub fn evolution_offer(&self) -> Option<&MedalCode> {
         self.offer.as_ref()
     }
     pub fn alive_enemy_count(&self) -> usize {
@@ -273,13 +274,39 @@ impl GameSession {
         ]
     }
 
-    /// メダルが奈落へ落ちた（tickごとの枚数の集計）。進化ゲージに加算し、満タンになったら知らせる。
-    /// 満タンになった時点で New! の候補（未所持の素材から1つ）を決めて固定する。
-    pub fn medals_fell(&mut self, count: u32, specs: &SpecCatalog) -> Vec<DomainEvent> {
+    /// メダルが奈落へ落ちた（tickごとの集計）。`value`
+    /// は落ちたメダルの価値の合計（ノーマルは1枚1.0、 偽物は0、輝きは2倍。
+    /// [`crate::unit::MedalUnit::modifiers`] の `value`）。価値 × 難易度のポイントを
+    /// 四捨五入してゲージに足す。物理由来の値なので、非有限・負は0として扱う（エラーにしない）。
+    pub fn medals_fell(&mut self, value: f32, specs: &SpecCatalog) -> Vec<DomainEvent> {
+        let points = self.points_for(value);
+        self.fill_gauge(points, specs)
+    }
+
+    /// 能力によるゲージの加算（[`crate::ability::Effect::Gauge`]）。落下と同じく満タンで知らせる。
+    pub fn add_gauge(&mut self, points: u32, specs: &SpecCatalog) -> Vec<DomainEvent> {
+        self.fill_gauge(points, specs)
+    }
+
+    fn points_for(&self, value: f32) -> u32 {
+        if !(value.is_finite() && value > 0.0) {
+            return 0;
+        }
+        let points = (f64::from(value) * f64::from(self.gauge_points)).round();
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        if points >= f64::from(u32::MAX) {
+            u32::MAX
+        } else {
+            points as u32
+        }
+    }
+
+    /// ゲージに足し、満タンになったら知らせる。満タンになった時点で New! の候補
+    /// （未所持の素材から1つ）を決めて固定する。
+    fn fill_gauge(&mut self, points: u32, specs: &SpecCatalog) -> Vec<DomainEvent> {
         if self.ensure_playing().is_err() || !self.can_evolve(specs) {
             return Vec::new();
         }
-        let points = count.saturating_mul(self.gauge_points);
         if !self.gauge.fill(points) {
             return Vec::new();
         }
@@ -294,6 +321,12 @@ impl GameSession {
             .and_then(|i| unowned().nth(i))
             .cloned();
         vec![DomainEvent::EvolutionReady]
+    }
+
+    /// 素材メダルから1つ（セッションの乱数。同じシードなら同じ順に選ぶ）。生成・変化の効果に使う。
+    pub fn random_element(&mut self, specs: &SpecCatalog) -> Option<MedalCode> {
+        let i = self.rng.pick(specs.elements().count())?;
+        specs.elements().nth(i).cloned()
     }
 
     /// 進化先が尽きたらゲージを溜めず、選べない進化画面による停止を防ぐ。
@@ -312,7 +345,7 @@ impl GameSession {
         &'a self,
         specs: &'a SpecCatalog,
     ) -> impl Iterator<Item = EvolutionChoice> + 'a {
-        let owned = |m: &MedalId| self.medals.level(m).is_some();
+        let owned = |m: &MedalCode| self.medals.level(m).is_some();
         let level_ups = self
             .medals
             .owned()
@@ -382,7 +415,7 @@ impl GameSession {
     }
 
     /// 所持しているメダル種の、今のレベルでの物理特性。所持していなければ `None`。
-    pub fn medal_spec(&self, medal: &MedalId, specs: &SpecCatalog) -> Option<MedalSpec> {
+    pub fn medal_spec(&self, medal: &MedalCode, specs: &SpecCatalog) -> Option<MedalSpec> {
         let level = self.medals.level(medal)?;
         specs.medal(medal, level).copied()
     }
@@ -613,7 +646,7 @@ mod tests {
     fn results_and_requests_after_loss_are_ignored_or_rejected(started: (GameSession, Stage)) {
         let (mut session, stage) = started;
         session.advance(&stage, Tick(60));
-        session.medals_fell(100, &catalog());
+        session.medals_fell(100.0, &catalog());
         session.enemy_reached_goal(EnemyId(1), GoalId(1));
         let lost = session.status();
 
@@ -623,11 +656,11 @@ mod tests {
                 .is_empty()
         );
         assert!(session.enemy_fell(EnemyId(2)).is_empty());
-        assert!(session.medals_fell(100, &catalog()).is_empty());
+        assert!(session.medals_fell(100.0, &catalog()).is_empty());
         assert!(session.advance(&stage, Tick(600)).is_empty());
         assert_eq!(session.ensure_playing(), Err(GameSessionError::NotPlaying(lost)));
         assert_eq!(
-            session.evolve(Evolution::LevelUp(MedalId::normal()), &catalog()),
+            session.evolve(Evolution::LevelUp(MedalCode::normal()), &catalog()),
             Err(GameSessionError::NotPlaying(lost))
         );
     }
@@ -674,13 +707,13 @@ mod tests {
 
     /// ゲージは10で満タン。Easy は1枚4ポイント、最難は1枚1ポイント（spec の fixture）。
     #[rstest]
-    #[case::easy(Difficulty::EASY, 2, 3)]
-    #[case::hardest(Difficulty::HARDEST, 9, 10)]
+    #[case::easy(Difficulty::EASY, 2.0, 3.0)]
+    #[case::hardest(Difficulty::HARDEST, 9.0, 10.0)]
     fn falling_medals_fill_the_gauge_by_difficulty(
         stage: Stage,
         #[case] difficulty: Difficulty,
-        #[case] not_yet: u32,
-        #[case] enough: u32,
+        #[case] not_yet: f32,
+        #[case] enough: f32,
     ) {
         let mut session = start(&stage, difficulty);
         assert!(session.medals_fell(not_yet, &catalog()).is_empty());
@@ -690,7 +723,7 @@ mod tests {
             [DomainEvent::EvolutionReady]
         );
         assert!(session.gauge().is_full());
-        assert!(session.medals_fell(5, &catalog()).is_empty(), "reported only once");
+        assert!(session.medals_fell(5.0, &catalog()).is_empty(), "reported only once");
     }
 
     #[rstest]
@@ -698,7 +731,7 @@ mod tests {
         let (mut session, _) = started;
         let before = session.medals().clone();
         assert_eq!(
-            session.evolve(Evolution::LevelUp(MedalId::normal()), &catalog),
+            session.evolve(Evolution::LevelUp(MedalCode::normal()), &catalog),
             Err(GameSessionError::Evolution(EvolutionError::NotReady))
         );
         assert_eq!(*session.medals(), before);
@@ -710,14 +743,14 @@ mod tests {
         catalog: SpecCatalog,
     ) {
         let (mut session, _) = started;
-        session.medals_fell(10, &catalog);
+        session.medals_fell(10.0, &catalog);
         assert_eq!(
-            session.evolve(Evolution::LevelUp(MedalId::normal()), &catalog),
-            Ok(DomainEvent::Evolved { medal: MedalId::normal(), level: lv(2) })
+            session.evolve(Evolution::LevelUp(MedalCode::normal()), &catalog),
+            Ok(DomainEvent::Evolved { medal: MedalCode::normal(), level: lv(2) })
         );
         assert_eq!(
             session
-                .medal_spec(&MedalId::normal(), &catalog)
+                .medal_spec(&MedalCode::normal(), &catalog)
                 .map(|s| s.mass.get()),
             Some(2.0)
         );
@@ -730,7 +763,7 @@ mod tests {
         catalog: SpecCatalog,
     ) {
         let (mut session, _) = started;
-        session.medals_fell(10, &catalog);
+        session.medals_fell(10.0, &catalog);
         assert_eq!(
             session.evolve(Evolution::LevelUp(fire()), &catalog),
             Err(GameSessionError::Evolution(EvolutionError::NotOwned(fire())))
@@ -743,25 +776,25 @@ mod tests {
         let (mut session, _) = started;
         // Normal を Lv.4 にする（3回）
         for _ in 0..3 {
-            session.medals_fell(10, &catalog);
+            session.medals_fell(10.0, &catalog);
             session
-                .evolve(Evolution::LevelUp(MedalId::normal()), &catalog)
+                .evolve(Evolution::LevelUp(MedalCode::normal()), &catalog)
                 .expect("level up");
         }
-        session.medals_fell(10, &catalog);
+        session.medals_fell(10.0, &catalog);
         assert_eq!(
-            session.evolve(Evolution::Fuse(MedalId::normal(), fire()), &catalog),
+            session.evolve(Evolution::Fuse(MedalCode::normal(), fire()), &catalog),
             Err(GameSessionError::Evolution(EvolutionError::NotOwned(fire()))),
             "Fire is not owned yet"
         );
-        assert_eq!(session.medals().level(&MedalId::normal()), Some(lv(4)));
+        assert_eq!(session.medals().level(&MedalCode::normal()), Some(lv(4)));
         assert_eq!(session.medal_spec(&sauna(), &catalog), None, "not owned");
     }
 
     // ── New! ──
 
-    fn fill(session: &mut GameSession, catalog: &SpecCatalog) -> Option<MedalId> {
-        session.medals_fell(10, catalog);
+    fn fill(session: &mut GameSession, catalog: &SpecCatalog) -> Option<MedalCode> {
+        session.medals_fell(10.0, catalog);
         session.evolution_offer().cloned()
     }
 
@@ -774,7 +807,7 @@ mod tests {
         assert_eq!(session.evolution_offer(), None, "nothing before the gauge fills");
         let offer = fill(&mut session, &catalog).expect("an element is offered");
         assert!([fire(), water()].contains(&offer));
-        session.medals_fell(10, &catalog);
+        session.medals_fell(10.0, &catalog);
         assert_eq!(
             session.evolution_offer(),
             Some(&offer),
@@ -825,7 +858,7 @@ mod tests {
         let (mut session, _) = started;
         fill(&mut session, &catalog);
         session
-            .evolve(Evolution::LevelUp(MedalId::normal()), &catalog)
+            .evolve(Evolution::LevelUp(MedalCode::normal()), &catalog)
             .expect("level up");
         assert_eq!(session.evolution_offer(), None);
     }
@@ -876,7 +909,7 @@ mod tests {
         assert_eq!(
             started
                 .0
-                .medal_spec(&MedalId::normal(), &catalog)
+                .medal_spec(&MedalCode::normal(), &catalog)
                 .map(|s| s.mass.get()),
             Some(1.0)
         );
@@ -921,7 +954,7 @@ mod tests {
                 .all(|(_, l)| l == MedalLevel::MAX)
         );
         assert!(!session.gauge().is_full(), "there must be no empty evolution screen");
-        assert!(session.medals_fell(100, &catalog).is_empty());
+        assert!(session.medals_fell(100.0, &catalog).is_empty());
     }
 
     // ── 能力の発動と再生 ──
@@ -949,7 +982,7 @@ mod tests {
         SpecCatalog::new(parts).expect("valid")
     }
 
-    fn fired(medal: MedalId, level: u8) -> AbilityRef {
+    fn fired(medal: MedalCode, level: u8) -> AbilityRef {
         AbilityRef { medal, level: lv(level), index: 0 }
     }
 
@@ -1026,15 +1059,89 @@ mod tests {
     ) {
         let (mut session, stage) = started;
         let specs = ability_catalog();
-        session.medals_fell(10, &specs);
+        session.medals_fell(10.0, &specs);
         assert_eq!(session.fire_ability(&fired(fire(), 1), &specs), None);
         session
-            .evolve(Evolution::LevelUp(MedalId::normal()), &specs)
+            .evolve(Evolution::LevelUp(MedalCode::normal()), &specs)
             .expect("level up");
         let enemy = session.advance(&stage, Tick(0))[0].enemy;
         session.enemy_reached_goal(enemy, GoalId(1));
         assert_eq!(session.fire_ability(&fired(fire(), 1), &specs), None);
         assert_eq!(session.last_ability, None, "nothing was recorded");
+    }
+
+    /// Easy は1枚4ポイント、10で満タン（spec の fixture）。
+    #[rstest]
+    #[case::shiny_medals(2.5, true)]
+    #[case::rounded_up(2.4, true)]
+    #[case::rounded_down(2.3, false)]
+    #[case::fakes_are_worth_nothing(0.0, false)]
+    #[case::negative(-5.0, false)]
+    #[case::nan(f32::NAN, false)]
+    #[case::infinite(f32::INFINITY, false)]
+    fn falling_value_fills_the_gauge(
+        started: (GameSession, Stage),
+        catalog: SpecCatalog,
+        #[case] value: f32,
+        #[case] full: bool,
+    ) {
+        let (mut session, _) = started;
+        session.medals_fell(value, &catalog);
+        assert_eq!(session.gauge().is_full(), full);
+    }
+
+    #[rstest]
+    fn huge_value_saturates_instead_of_overflowing(
+        started: (GameSession, Stage),
+        catalog: SpecCatalog,
+    ) {
+        let (mut session, _) = started;
+        assert_eq!(session.medals_fell(f32::MAX, &catalog), [DomainEvent::EvolutionReady]);
+    }
+
+    #[rstest]
+    fn abilities_add_points_like_falls(started: (GameSession, Stage), catalog: SpecCatalog) {
+        let (mut session, _) = started;
+        assert!(session.add_gauge(9, &catalog).is_empty());
+        assert_eq!(session.add_gauge(1, &catalog), [DomainEvent::EvolutionReady]);
+        assert!(session.evolution_offer().is_some(), "New! is chosen as with falls");
+        assert!(session.add_gauge(5, &catalog).is_empty(), "reported once");
+    }
+
+    #[rstest]
+    fn no_points_after_the_game(started: (GameSession, Stage), catalog: SpecCatalog) {
+        let (mut session, stage) = started;
+        let enemy = session.advance(&stage, Tick(0))[0].enemy;
+        session.enemy_reached_goal(enemy, GoalId(1));
+        assert!(session.add_gauge(100, &catalog).is_empty());
+        assert!(!session.gauge().is_full());
+    }
+
+    #[rstest]
+    fn random_elements_follow_the_seed_and_cover_every_element(stage: Stage, catalog: SpecCatalog) {
+        let rules = *catalog.evolution();
+        let picks = |seed| {
+            let (mut session, _) = GameSession::start(
+                GameSessionId(1),
+                &stage,
+                &character(),
+                Difficulty::EASY,
+                &rules,
+                seed,
+            );
+            (0..32)
+                .map(|_| {
+                    session
+                        .random_element(&catalog)
+                        .expect("elements exist")
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(picks(3), picks(3));
+        assert_eq!(
+            picks(3).into_iter().collect::<HashSet<_>>(),
+            HashSet::from([fire(), water()])
+        );
     }
 
     // ── 進行できる状態 ──
@@ -1043,10 +1150,10 @@ mod tests {
     fn running_until_the_gauge_fills(started: (GameSession, Stage), catalog: SpecCatalog) {
         let (mut session, _) = started;
         assert_eq!(session.ensure_running(), Ok(()));
-        session.medals_fell(10, &catalog);
+        session.medals_fell(10.0, &catalog);
         assert_eq!(session.ensure_running(), Err(GameSessionError::EvolutionPending));
         session
-            .evolve(Evolution::LevelUp(MedalId::normal()), &catalog)
+            .evolve(Evolution::LevelUp(MedalCode::normal()), &catalog)
             .expect("level up");
         assert_eq!(session.ensure_running(), Ok(()));
     }
@@ -1069,17 +1176,17 @@ mod tests {
         catalog: SpecCatalog,
     ) {
         let (mut session, stage) = started;
-        session.medals_fell(10, &catalog);
+        session.medals_fell(10.0, &catalog);
         assert!(session.advance(&stage, Tick(60)).is_empty());
         session
-            .evolve(Evolution::LevelUp(MedalId::normal()), &catalog)
+            .evolve(Evolution::LevelUp(MedalCode::normal()), &catalog)
             .expect("level up");
         assert_eq!(ids(&session.advance(&stage, Tick(60))), [1, 2]);
     }
 
     // ── 進化画面の選択肢 ──
 
-    fn choices(session: &GameSession, catalog: &SpecCatalog) -> Vec<(Evolution, MedalId, bool)> {
+    fn choices(session: &GameSession, catalog: &SpecCatalog) -> Vec<(Evolution, MedalCode, bool)> {
         session
             .evolution_choices(catalog)
             .map(|c| (c.evolution, c.result, c.available))
@@ -1096,7 +1203,7 @@ mod tests {
         assert_eq!(
             choices(&session, &catalog),
             [
-                (Evolution::LevelUp(MedalId::normal()), MedalId::normal(), true),
+                (Evolution::LevelUp(MedalCode::normal()), MedalCode::normal(), true),
                 (Evolution::Acquire(offer.clone()), offer, true),
             ]
         );
@@ -1127,7 +1234,7 @@ mod tests {
     /// 錬成・New! を含め、試し得るすべての進化。錬成は順序を問わないため、素材の組は a ≦ b
     /// の正規順だけを並べる（逆順は同じ選択肢）。
     fn every_evolution() -> Vec<Evolution> {
-        let medals = [MedalId::normal(), fire(), water(), sauna()];
+        let medals = [MedalCode::normal(), fire(), water(), sauna()];
         let mut all: Vec<_> = medals
             .iter()
             .flat_map(|m| [Evolution::LevelUp(m.clone()), Evolution::Acquire(m.clone())])
@@ -1148,7 +1255,7 @@ mod tests {
 
     fn evolution() -> impl Strategy<Value = Evolution> {
         let medal =
-            prop_oneof![Just(MedalId::normal()), Just(fire()), Just(water()), Just(sauna())];
+            prop_oneof![Just(MedalCode::normal()), Just(fire()), Just(water()), Just(sauna())];
         prop_oneof![
             medal.clone().prop_map(Evolution::LevelUp),
             medal.clone().prop_map(Evolution::Acquire),
@@ -1185,7 +1292,7 @@ mod tests {
             let catalog = SpecCatalog::new(spec_parts()).expect("valid");
             let (mut session, _) = started(stage(parts()));
             for evolution in evolutions {
-                session.medals_fell(10, &catalog);
+                session.medals_fell(10.0, &catalog);
                 let before = (session.medals().clone(), *session.gauge());
                 if session.evolve(evolution, &catalog).is_err() {
                     prop_assert_eq!((session.medals().clone(), *session.gauge()), before);
@@ -1201,7 +1308,7 @@ mod tests {
             let catalog = SpecCatalog::new(spec_parts()).expect("valid");
             let (mut session, _) = started(stage(parts()));
             for evolution in evolutions {
-                session.medals_fell(10, &catalog);
+                session.medals_fell(10.0, &catalog);
                 let available: Vec<_> = session
                     .evolution_choices(&catalog)
                     .filter(|c| c.available)

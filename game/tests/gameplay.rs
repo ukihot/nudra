@@ -23,7 +23,7 @@ use game::{
         requests::RequestLedger,
         save::{FileProgressRepository, decode},
         session::{ActiveGame, GameClock},
-        world::{Enemy, MedalKind, Pusher},
+        world::{Enemy, Medal, Pusher},
     },
     port::{
         CharacterRoster, ControlIntent, DomainEventMsg, GameResult, RejectReason, Request,
@@ -241,7 +241,7 @@ fn boot_opens_title_with_exactly_three_menu_actions() {
     ] {
         assert!(actions.contains(&screen));
     }
-    assert_eq!(count::<MedalKind>(&mut app), 0);
+    assert_eq!(count::<Medal>(&mut app), 0);
 }
 
 #[test]
@@ -288,7 +288,7 @@ fn options_language_is_saved_and_restored_on_restart() {
     run_until(&mut app, 10, |a| app_state(a) == AppState::Credits);
     submit(&mut app, Request::Navigate(OutgameScreen::Title));
     run_until(&mut app, 10, |a| app_state(a) == AppState::Title);
-    assert_eq!(count::<MedalKind>(&mut app), 0);
+    assert_eq!(count::<Medal>(&mut app), 0);
 }
 
 #[test]
@@ -322,7 +322,7 @@ fn locked_difficulty_and_unknown_stage_are_rejected_without_starting() {
 fn start_request_completes_and_builds_the_stage() {
     let mut app = started();
     app.update();
-    assert_eq!(count::<MedalKind>(&mut app), INITIAL_MEDALS);
+    assert_eq!(count::<Medal>(&mut app), INITIAL_MEDALS);
     assert_eq!(count::<Pusher>(&mut app), 1);
     assert!(matches!(
         recorded(&app).events.first(),
@@ -401,7 +401,7 @@ fn request_in_the_wrong_state_is_rejected() {
 fn level_up_request_completes_and_updates_medal_mass() {
     let mass = |app: &mut App| -> f32 {
         app.world_mut()
-            .query::<(&MedalKind, &Mass)>()
+            .query::<(&Medal, &Mass)>()
             .iter(app.world())
             .map(|(_, m)| m.0)
             .sum()
@@ -412,9 +412,9 @@ fn level_up_request_completes_and_updates_medal_mass() {
     app.world_mut()
         .resource_mut::<PendingFacts>()
         .0
-        .push(PhysicsFact::MedalsFell(25));
+        .push(PhysicsFact::MedalsFell(25.0));
     run_until(&mut app, 5, |a| phase(a) == Some(GamePhase::Evolving));
-    let medal = domain::id::MedalId::normal();
+    let medal = domain::id::MedalCode::normal();
     submit(
         &mut app,
         Request::Evolve(domain::evolution::Evolution::LevelUp(medal)),
@@ -430,7 +430,7 @@ fn enter_evolution(app: &mut App) {
     app.world_mut()
         .resource_mut::<PendingFacts>()
         .0
-        .push(PhysicsFact::MedalsFell(25));
+        .push(PhysicsFact::MedalsFell(25.0));
     run_until(app, 5, |a| phase(a) == Some(GamePhase::Evolving));
 }
 
@@ -464,7 +464,7 @@ fn evolution_freezes_clock_physics_and_firing_until_a_valid_choice() {
 
     submit(
         &mut app,
-        Request::Evolve(domain::evolution::Evolution::Acquire(domain::id::MedalId::new(
+        Request::Evolve(domain::evolution::Evolution::Acquire(domain::id::MedalCode::new(
             "unknown",
         ))),
     );
@@ -517,7 +517,7 @@ fn an_actual_medal_fall_is_counted_once(#[case] depth: f32) {
     let mut app = started();
     let medal = app
         .world_mut()
-        .query_filtered::<Entity, With<MedalKind>>()
+        .query_filtered::<Entity, With<Medal>>()
         .iter(app.world())
         .next()
         .expect("medal");
@@ -538,7 +538,7 @@ fn duplicate_sensor_results_and_safety_plane_count_the_same_medal_once() {
     let mut app = started();
     let medal = app
         .world_mut()
-        .query_filtered::<Entity, With<MedalKind>>()
+        .query_filtered::<Entity, With<Medal>>()
         .iter(app.world())
         .next()
         .expect("medal");
@@ -570,9 +570,9 @@ fn duplicate_sensor_results_and_safety_plane_count_the_same_medal_once() {
 
 #[test]
 fn fusion_consumes_owned_materials_and_resets_the_selected_medal() {
-    use domain::{evolution::Evolution, id::MedalId};
+    use domain::{evolution::Evolution, id::MedalCode};
     let mut app = started();
-    let m = |id: &str| MedalId::new(id);
+    let m = |id: &str| MedalCode::new(id);
     let owns = |app: &App, id: &str| {
         app.world()
             .resource::<ActiveGame>()
@@ -619,9 +619,9 @@ fn fusion_consumes_owned_materials_and_resets_the_selected_medal() {
     set_fire(&mut app, false);
     let fire_medals = |app: &mut App| {
         app.world_mut()
-            .query::<&MedalKind>()
+            .query::<&Medal>()
             .iter(app.world())
-            .filter(|kind| kind.0 == m("fire"))
+            .filter(|kind| kind.0.medal() == &m("fire"))
             .count()
     };
     assert_eq!(fire_medals(&mut app), 1);
@@ -635,7 +635,7 @@ fn fusion_consumes_owned_materials_and_resets_the_selected_medal() {
             .resource::<ActiveGame>()
             .catapult
             .selected(),
-        &MedalId::normal()
+        &MedalCode::normal()
     );
     submit(&mut app, Request::SelectMedal(m("fire")));
     let outcomes = recorded(&app).outcomes.len();
@@ -755,13 +755,13 @@ fn first_enemy_spawns_at_its_scheduled_tick() {
 fn holding_fire_launches_once_per_cooldown() {
     let mut app = started();
     app.update();
-    let medals = count::<MedalKind>(&mut app);
+    let medals = count::<Medal>(&mut app);
     set_fire(&mut app, true);
     for _ in 0..=COOLDOWN_TICKS * 2 {
         app.update();
     }
     assert_eq!(launches(&app), 3, "ticks t, t+15, t+30");
-    assert_eq!(count::<MedalKind>(&mut app), medals + 3);
+    assert_eq!(count::<Medal>(&mut app), medals + 3);
     assert_eq!(
         recorded(&app).outcomes.len(),
         1,
@@ -957,7 +957,7 @@ fn soak_random_play_has_no_runtime_errors() {
             submit(
                 &mut app,
                 Request::Evolve(domain::evolution::Evolution::LevelUp(
-                    domain::id::MedalId::normal(),
+                    domain::id::MedalCode::normal(),
                 )),
             );
             submitted += 1;
@@ -970,4 +970,264 @@ fn soak_random_play_has_no_runtime_errors() {
     }
     assert_eq!(app.world().resource::<RequestLedger>().pending_len(), 0);
     assert_eq!(recorded(&app).outcomes.len(), submitted);
+}
+
+// ── メダルの能力（効果の部品ごと、基本設計 3.14〜3.16） ──
+// 定義データ（game.specs.ron）のサンプルの能力を使う。メダルは本番と同じ `spawn_medal`
+// で盤面に出す。
+
+mod abilities {
+    use bevy::ecs::system::RunSystemOnce;
+    use domain::{
+        ability::Happening, evolution::MedalLevel, id::MedalCode, motion::Motion, unit::MedalUnit,
+    };
+    use game::{
+        infrastructure::{
+            abilities::{self, PendingOrders, ZoneField},
+            data::Specs,
+        },
+        port::{Appearance, MedalMotionState},
+    };
+
+    use super::*;
+
+    fn spawn(app: &mut App, code: &str, level: u8, at: Vec3) -> Entity {
+        let code = MedalCode::new(code);
+        app.world_mut()
+            .run_system_once(
+                move |mut commands: Commands,
+                      mut game: ResMut<ActiveGame>,
+                      specs: Res<Specs>,
+                      clock: Res<GameClock>,
+                      mut orders: ResMut<PendingOrders>,
+                      mut events: MessageWriter<DomainEventMsg>| {
+                    let unit = MedalUnit::new(code.clone(), MedalLevel::new(level).expect("level"));
+                    abilities::spawn_medal(
+                        &mut commands,
+                        &mut game.session,
+                        &specs,
+                        unit,
+                        at,
+                        Vec3::ZERO,
+                        &[Happening::Entered],
+                        clock.now(),
+                        &mut orders,
+                        &mut events,
+                    )
+                },
+            )
+            .expect("system ran")
+            .expect("spawned")
+    }
+
+    /// 初期配置の山の上（落とすと山のメダルにぶつかって着地する）。
+    fn above_the_pile(app: &mut App) -> Vec3 {
+        let p = app
+            .world_mut()
+            .query_filtered::<&Position, With<Medal>>()
+            .iter(app.world())
+            .next()
+            .expect("initial medals")
+            .0;
+        p + Vec3::Y * 0.6
+    }
+
+    fn motion(app: &App, medal: Entity) -> Option<Motion> {
+        app.world()
+            .get::<MedalMotionState>(medal)
+            .map(|m| m.0.state())
+    }
+
+    /// 山: 盤面に出たとき（常時の能力）に自分へ「不動」の印 → 定義の質量の8倍。
+    #[test]
+    fn an_always_ability_marks_the_medal_as_it_enters() {
+        let mut app = started();
+        let mountain = spawn(&mut app, "mountain", 1, Vec3::new(0.0, 2.0, 0.0));
+        let base = app
+            .world()
+            .resource::<Specs>()
+            .medal(&MedalCode::new("mountain"), MedalLevel::MIN)
+            .expect("mountain")
+            .mass
+            .get();
+        app.update();
+        assert_eq!(app.world().get::<Mass>(mountain).map(|m| m.0), Some(base * 8.0));
+    }
+
+    /// 幻: 落ちて転がり、止まったら（静止の出来事）ノーマルを1枚生む。挙動ステータスが飛行 →
+    /// 静止と進む。
+    #[test]
+    fn a_dropped_medal_lands_rests_and_fires_its_rest_ability() {
+        let mut app = started();
+        let at = above_the_pile(&mut app);
+        let before = count::<Medal>(&mut app);
+        let illusion = spawn(&mut app, "illusion", 1, at);
+        assert_eq!(motion(&app, illusion), Some(Motion::Flying));
+        run_until(&mut app, 900, |a| motion(a, illusion) == Some(Motion::Resting));
+        app.update();
+        assert_eq!(count::<Medal>(&mut app), before + 2, "itself and one normal medal");
+    }
+
+    /// 水: メダルにぶつかったら、周りを濡らす → 摩擦が下がる。
+    #[test]
+    fn a_collision_marks_nearby_medals_and_lowers_their_friction() {
+        let mut app = started();
+        let at = above_the_pile(&mut app);
+        let water = spawn(&mut app, "water", 1, at);
+        run_until(&mut app, 120, |a| {
+            a.world_mut()
+                .query::<(Entity, &Friction)>()
+                .iter(a.world())
+                .any(|(e, f)| e != water && f.dynamic_coefficient == 0.05)
+        });
+    }
+
+    /// 炎: 着地したら敵に効く「アチチ」の場を残し、4秒で消える。
+    #[test]
+    fn a_landing_leaves_a_zone_that_expires() {
+        let mut app = started();
+        let at = above_the_pile(&mut app);
+        spawn(&mut app, "fire", 1, at);
+        run_until(&mut app, 120, |a| count::<ZoneField>(a) == 1);
+        let key = app
+            .world_mut()
+            .query_filtered::<&Appearance, With<ZoneField>>()
+            .single(app.world())
+            .expect("one zone")
+            .key
+            .clone();
+        assert_eq!(key, "zone/hot");
+        run_until(&mut app, 300, |a| count::<ZoneField>(a) == 0);
+    }
+
+    /// 炎 Lv.4（覚醒）: 止まったら周りを外へ弾く。
+    #[test]
+    fn an_awakened_ability_pushes_nearby_medals() {
+        let mut app = started();
+        let at = above_the_pile(&mut app);
+        let fire = spawn(&mut app, "fire", 4, at);
+        run_until(&mut app, 900, |a| motion(a, fire) == Some(Motion::Resting));
+        let fastest = app
+            .world_mut()
+            .query_filtered::<(Entity, &LinearVelocity), With<Medal>>()
+            .iter(app.world())
+            .filter(|(e, _)| *e != fire)
+            .map(|(_, v)| v.length())
+            .fold(0.0, f32::max);
+        assert!(fastest > 1.0, "neighbours were blown away: {fastest}");
+    }
+
+    fn gauge(app: &App) -> f32 {
+        app.world()
+            .resource::<ActiveGame>()
+            .session
+            .gauge()
+            .ratio()
+    }
+
+    const BELOW_KILL_PLANE: Vec3 = Vec3::new(0.0, -40.0, 0.0);
+
+    /// ゾンビ: 1回目の落下はカタパルトへ復活して報酬なし。2回目の落下で退場し、
+    /// 報酬は1回だけ（4点）。
+    #[test]
+    fn a_revived_medal_is_rewarded_only_on_its_last_fall() {
+        let mut app = started();
+        let zombie = spawn(&mut app, "zombie", 1, BELOW_KILL_PLANE);
+        let catapult = app
+            .world()
+            .resource::<ActiveGame>()
+            .stage
+            .catapult()
+            .position();
+        run_until(&mut app, 5, |a| {
+            a.world()
+                .get::<Position>(zombie)
+                .is_some_and(|p| p.0.distance(catapult) < 0.5)
+        });
+        assert_eq!(gauge(&app), 0.0, "no reward for a revived fall");
+        teleport(&mut app, zombie, BELOW_KILL_PLANE);
+        run_until(&mut app, 5, |a| a.world().get_entity(zombie).is_err());
+        app.update();
+        assert_eq!(gauge(&app), 0.04, "one reward for the last fall");
+    }
+
+    /// 幻が生んだノーマルは報酬資格がない（能力生成は既定で資格なし）。落ちてもゲージは増えない。
+    #[test]
+    fn spawned_medals_without_a_reward_earn_nothing_when_they_fall() {
+        let mut app = started();
+        let at = above_the_pile(&mut app);
+        let illusion = spawn(&mut app, "illusion", 1, at);
+        let before: Vec<Entity> = app
+            .world_mut()
+            .query_filtered::<Entity, With<Medal>>()
+            .iter(app.world())
+            .collect();
+        run_until(&mut app, 900, |a| motion(a, illusion) == Some(Motion::Resting));
+        app.update();
+        let child = app
+            .world_mut()
+            .query_filtered::<Entity, With<Medal>>()
+            .iter(app.world())
+            .find(|e| !before.contains(e))
+            .expect("the spawned child");
+        teleport(&mut app, child, BELOW_KILL_PLANE);
+        run_until(&mut app, 5, |a| a.world().get_entity(child).is_err());
+        app.update();
+        assert_eq!(gauge(&app), 0.0);
+    }
+
+    fn mass(app: &App, medal: Entity) -> f32 {
+        app.world().get::<Mass>(medal).expect("mass").0
+    }
+
+    /// 血: 敵が奈落へ落ちて撃破が確定したら、他が落ちた能力で育つ（質量1.5倍）。
+    #[test]
+    fn an_enemy_falling_notifies_other_fell() {
+        let mut app = started();
+        let blood = spawn(&mut app, "blood", 1, Vec3::new(0.0, 0.5, 0.0));
+        app.update();
+        let base = mass(&app, blood);
+        let enemy = first_enemy(&mut app);
+        teleport(&mut app, enemy, ABYSS);
+        run_until(&mut app, 10, |a| a.world().get_entity(enemy).is_err());
+        app.update();
+        assert_eq!(mass(&app, blood), base * 1.5);
+    }
+
+    /// 血: メダルが落ちたら育つ。復活したメダル（ゾンビの1回目）からは通知しない。
+    #[test]
+    fn only_medals_that_really_leave_notify_other_fell() {
+        let mut app = started();
+        let blood = spawn(&mut app, "blood", 1, Vec3::new(0.0, 0.5, 0.0));
+        app.update();
+        let base = mass(&app, blood);
+        let zombie = spawn(&mut app, "zombie", 1, BELOW_KILL_PLANE);
+        run_until(&mut app, 5, |a| {
+            a.world()
+                .get::<Position>(zombie)
+                .is_some_and(|p| p.y > 0.0)
+        });
+        app.update();
+        assert_eq!(mass(&app, blood), base, "a revived medal did not leave");
+        teleport(&mut app, zombie, BELOW_KILL_PLANE);
+        run_until(&mut app, 5, |a| a.world().get_entity(zombie).is_err());
+        app.update();
+        assert_eq!(mass(&app, blood), base * 1.5);
+    }
+
+    /// 星: 落ちたら（自分が落ちた能力）ゲージ+5。落下そのものの価値1.0 × Easy 4点と合わせて9点。
+    #[test]
+    fn a_fall_ability_adds_points_with_the_fall() {
+        let mut app = started();
+        spawn(&mut app, "star", 1, Vec3::new(0.0, -40.0, 0.0));
+        let ratio = |a: &App| {
+            a.world()
+                .resource::<ActiveGame>()
+                .session
+                .gauge()
+                .ratio()
+        };
+        run_until(&mut app, 5, |a| ratio(a) > 0.0);
+        assert_eq!(ratio(&app), 0.09);
+    }
 }

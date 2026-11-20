@@ -3,7 +3,7 @@
 use std::borrow::Cow;
 
 use bevy::prelude::*;
-use domain::id::{EnemyTypeId, MedalId, PusherCharacterId};
+use domain::id::{EnemyTypeId, MedalCode, PusherCharacterId};
 
 /// 仮の形状。アセットが無いときのプレースホルダと、ビルボードの大きさに使う。
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -46,7 +46,7 @@ impl Appearance {
         Self { key: key.into(), silhouette }
     }
 
-    pub fn medal_key(medal: &MedalId) -> String {
+    pub fn medal_key(medal: &MedalCode) -> String {
         format!("medal/{medal}")
     }
 

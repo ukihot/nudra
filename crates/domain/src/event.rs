@@ -1,6 +1,6 @@
 use crate::{
     evolution::MedalLevel,
-    id::{EnemyId, EnemyTypeId, GameSessionId, GoalId, MedalId, PusherCharacterId, StageId},
+    id::{EnemyId, EnemyTypeId, GameSessionId, GoalId, MedalCode, PusherCharacterId, StageId},
 };
 
 /// ゲーム上の意味を持つ出来事。集約・ドメイン関数の戻り値として返す（基本設計 3.9）。
@@ -12,7 +12,7 @@ pub enum DomainEvent {
         character: PusherCharacterId,
     },
     MedalLaunched {
-        medal: MedalId,
+        medal: MedalCode,
     },
     EnemySpawned {
         enemy: EnemyId,
@@ -40,7 +40,7 @@ pub enum DomainEvent {
     EvolutionReady,
     /// 進化した: そのメダル種がこのレベルになった（錬成なら新しいメダルの Lv.1）
     Evolved {
-        medal: MedalId,
+        medal: MedalCode,
         level: MedalLevel,
     },
 }

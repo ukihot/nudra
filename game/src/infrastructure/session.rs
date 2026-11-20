@@ -13,7 +13,7 @@ use application::{
     SelectMedalError, StartGameCommand, advance_waves, check_start, evolve, launch_medal,
     record_result, resolve_physics, select_medal, start_game,
 };
-use avian3d::prelude::{Collider, Forces, Friction, Mass, Physics, PhysicsTime, Restitution};
+use avian3d::prelude::{Forces, Physics, PhysicsTime};
 // Bevy 0.20 の prelude は `ContextExt`（`.context()`）を含み `anyhow::Context`
 // と衝突するため、 anyhow で文脈を付けるこのファイルでは prelude を glob で読み込まない。
 use bevy::prelude::{
@@ -22,28 +22,34 @@ use bevy::prelude::{
     State, SystemSet, Time, Update, debug, error, in_state, info, resource_exists, warn,
 };
 use domain::{
+    ability::Happening,
     difficulty::Difficulty,
     event::DomainEvent,
-    id::{GameSessionId, MedalId, PusherCharacterId, StageId},
+    evolution::MedalLevel,
+    id::{GameSessionId, MedalCode, PusherCharacterId, StageId},
     launch::CatapultState,
     navigation::Route,
     pusher::PusherCharacter,
-    session::{GameSession, GameStatus},
+    session::{GameSession, GameSessionError, GameStatus},
     stage::Stage,
     time::Tick,
+    unit::MedalUnit,
 };
 
 use super::{
+    abilities::{
+        self, AbilityTimers, DefeatedEnemies, FallenMedals, MedalBodyData, PendingOrders, Touching,
+    },
     data::{CharacterCatalog, Specs, StageCatalog},
     physics::{self, KILL_DEPTH, KillPlane, PendingFacts},
     progress::{Progress, SaveJob},
     requests::{RequestKind, RequestLedger, outcome},
-    world::{self, Enemy, MedalKind, Pusher, PusherMotion},
+    world::{self, Enemy, Pusher, PusherMotion},
 };
 use crate::{
     port::{
         AimModel, Appearance, ControlIntent, DomainEventMsg, EvolutionModel, GameResult, HudModel,
-        MedalModel, RejectReason, Request, RequestOutcome, RequestStatus, Silhouette,
+        MedalModel, MedalMotionState, RejectReason, Request, RequestOutcome, RequestStatus,
         SubmitRequest,
     },
     state::{AppState, GamePhase},
@@ -90,10 +96,15 @@ pub enum GameplaySet {
     Resolve,
     /// 指図（強化）の受付と、意図（旋回・発射）の反映
     Command,
+    /// メダルの能力: 衝突 → 挙動の観測 → 時限 → 指示の実行 → 場 → 印の期限（基本設計 3.14〜3.16）
+    Abilities,
     /// 敵の出現・歩行力・Pusherの制御力
     Intent,
     /// 時計を1つ進める（このtickの処理はすべて同じTickを見る）
     Advance,
+    /// 状態の切り替え: 終了 → Ending、ゲージ満タン →
+    /// Evolving（どの経路で満たされても、ここで1か所で決める）
+    Phase,
 }
 
 /// セッションに必要な値を1つにまとめる。「一部だけ存在する」時間帯を作らない（基本設計 6.4）。
@@ -120,11 +131,17 @@ struct SessionCounter(u64);
 pub(super) fn plugin(app: &mut App) {
     use GameplaySet::*;
     app.init_resource::<PendingFacts>()
+        .init_resource::<PendingOrders>()
+        .init_resource::<FallenMedals>()
+        .init_resource::<Touching>()
+        .init_resource::<DefeatedEnemies>()
         .init_resource::<SessionCounter>()
         .init_resource::<RequestLedger>()
         .configure_sets(
             FixedUpdate,
-            (Resolve, Command, Intent, Advance).chain().run_if(in_state(GamePhase::Running)),
+            (Resolve, Command, Abilities, Intent, Advance, Phase)
+                .chain()
+                .run_if(in_state(GamePhase::Running)),
         )
         // 指図: 記帳 → 状態ごとの受付 → フレームの終わりに状態違い・期限切れを判定
         .add_systems(Update, register_requests)
@@ -145,10 +162,29 @@ pub(super) fn plugin(app: &mut App) {
         .add_systems(
             FixedUpdate,
             (
-                (physics::collect_facts, resolve).chain().in_set(Resolve),
+                (
+                    physics::collect_facts,
+                    abilities::medal_falls,
+                    resolve,
+                    abilities::enemy_falls,
+                )
+                    .chain()
+                    .in_set(Resolve),
                 apply_intent.in_set(Command).run_if(can_advance),
+                (
+                    abilities::collisions,
+                    abilities::observe_motion,
+                    abilities::run_timers,
+                    abilities::execute_orders,
+                    abilities::zones,
+                    abilities::expire,
+                )
+                    .chain()
+                    .in_set(Abilities)
+                    .run_if(can_advance),
                 (spawn_waves, physics::walk_enemies, drive_pushers).in_set(Intent).run_if(can_advance),
                 advance_clock.in_set(Advance).run_if(can_advance),
+                decide_phase.in_set(Phase),
             ),
         )
         .add_systems(Update, publish_models.run_if(resource_exists::<ActiveGame>));
@@ -287,11 +323,16 @@ fn start_session(
         .with_context(|| format!("failed to start game with {selection:?}"))?;
     let medal = out
         .session
-        .medal_spec(&MedalId::normal(), &specs)
+        .medal_spec(&MedalCode::normal(), &specs)
         .context("normal medal spec is missing")?;
 
     world::spawn_stage(&mut commands, &out.stage, out.session.difficulty());
-    world::spawn_initial_medals(&mut commands, &out.stage, &medal);
+    let normal = out
+        .session
+        .medals()
+        .level(&MedalCode::normal())
+        .unwrap_or(MedalLevel::MIN);
+    world::spawn_initial_medals(&mut commands, &out.stage, normal, &medal);
     world::spawn_pusher(&mut commands, &out.stage, &out.character.id, &out.pusher);
 
     facts.0.clear();
@@ -376,6 +417,10 @@ fn end_session(mut commands: Commands, mut intent: ResMut<ControlIntent>) {
     commands.remove_resource::<KillPlane>();
     commands.insert_resource(MedalModel::default());
     commands.insert_resource(EvolutionModel::default());
+    // 盤面のEntityは消えるため、それを指す実行待ちの指示も捨てる
+    commands.insert_resource(PendingOrders::default());
+    commands.insert_resource(FallenMedals::default());
+    commands.insert_resource(DefeatedEnemies::default());
     // 押しっぱなしの意図を次のセッションへ持ち越さない
     *intent = ControlIntent::default();
 }
@@ -388,10 +433,9 @@ fn resolve(
     mut facts: ResMut<PendingFacts>,
     enemies: Query<(Entity, &Enemy)>,
     mut commands: Commands,
+    mut defeated_enemies: ResMut<DefeatedEnemies>,
     mut events: MessageWriter<DomainEventMsg>,
-    mut phase: ResMut<NextState<GamePhase>>,
     specs: Res<Specs>,
-    mut physics_time: ResMut<Time<Physics>>,
 ) {
     if facts.0.is_empty() {
         return;
@@ -405,14 +449,27 @@ fn resolve(
         })
         .collect();
     physics::despawn_enemies(&defeated, &enemies, &mut commands);
-    if game.session.status() != GameStatus::Playing {
-        physics_time.pause();
-        phase.set(GamePhase::Ending);
-    } else if game.session.gauge().is_full() {
-        physics_time.pause();
-        phase.set(GamePhase::Evolving);
-    }
+    // 撃破が確定した敵の数だけ、生存メダルへ OtherFell を通知する（基本設計 4.3）
+    defeated_enemies.0 += defeated.len();
     events.write_batch(resolved.into_iter().map(DomainEventMsg));
+}
+
+// ── Phase ─────────────────────────────────────────────────
+
+/// 終了したら Ending、ゲージが満タンなら Evolving へ。物理を止め、論理時計も（`can_advance`
+/// で）止まる。 落下・能力のどちらでゲージが満たされても、この1か所で切り替える。
+fn decide_phase(
+    game: Res<ActiveGame>,
+    mut phase: ResMut<NextState<GamePhase>>,
+    mut physics_time: ResMut<Time<Physics>>,
+) {
+    let next = match game.session.ensure_running() {
+        Ok(()) => return,
+        Err(GameSessionError::EvolutionPending) => GamePhase::Evolving,
+        Err(_) => GamePhase::Ending,
+    };
+    physics_time.pause();
+    phase.set(next);
 }
 
 // ── Command ───────────────────────────────────────────────
@@ -423,14 +480,9 @@ fn accept_evolution(
     mut ledger: ResMut<RequestLedger>,
     mut game: ResMut<ActiveGame>,
     specs: Res<Specs>,
-    mut medals: Query<(
-        &MedalKind,
-        &mut Mass,
-        &mut Collider,
-        &mut Friction,
-        &mut Restitution,
-        &mut Appearance,
-    )>,
+    clock: Res<GameClock>,
+    mut medals: Query<(Entity, MedalBodyData, &mut AbilityTimers, &MedalMotionState)>,
+    mut commands: Commands,
     mut events: MessageWriter<DomainEventMsg>,
     mut outcomes: MessageWriter<RequestOutcome>,
     mut phase: ResMut<NextState<GamePhase>>,
@@ -444,24 +496,22 @@ fn accept_evolution(
         let ActiveGame { session, catapult, .. } = &mut *game;
         let status = match evolve(session, catapult, &specs, evolution.clone()) {
             Ok(out) => {
-                if let Some((medal, spec)) = out.medal {
-                    for (
-                        _,
-                        mut mass,
-                        mut collider,
-                        mut friction,
-                        mut restitution,
-                        mut appearance,
-                    ) in medals.iter_mut().filter(|(kind, ..)| kind.0 == medal)
-                    {
-                        mass.0 = spec.mass.get();
-                        *collider = Collider::cylinder(spec.radius.get(), spec.thickness.get());
-                        *friction = Friction::new(spec.friction);
-                        *restitution = Restitution::new(spec.restitution);
-                        appearance.silhouette = Silhouette::Cylinder {
-                            radius: spec.radius.get(),
-                            height: spec.thickness.get(),
-                        };
+                // 盤面の同じ種のメダルも成長する（物理特性・能力・覚醒の予定を1回だけ作り直す）
+                if let DomainEvent::Evolved { medal, level } = &out.event {
+                    for (entity, mut body, mut timers, motion) in &mut medals {
+                        if body.medal.0.medal() != medal {
+                            continue;
+                        }
+                        body.medal.0.set_level(*level);
+                        body.refresh(&specs, &mut commands);
+                        *timers = AbilityTimers::new(&specs, &body.medal.0, clock.now());
+                        abilities::resubscribe(
+                            &mut commands,
+                            entity,
+                            &specs,
+                            &body.medal.0,
+                            motion.0.state(),
+                        );
                     }
                 }
                 phase.set(GamePhase::Running);
@@ -481,6 +531,7 @@ fn apply_intent(
     clock: Res<GameClock>,
     specs: Res<Specs>,
     mut commands: Commands,
+    mut orders: ResMut<PendingOrders>,
     mut events: MessageWriter<DomainEventMsg>,
 ) {
     let ActiveGame { session, stage, catapult, .. } = &mut *game;
@@ -494,8 +545,23 @@ fn apply_intent(
     // 発射条件（クールダウン）が成立していなければ何もしない。却下ではない
     match launch_medal(session, stage, catapult, &specs, clock.now()) {
         Ok(Some(out)) => {
-            world::spawn_launched_medal(&mut commands, &out.plan);
             events.write(DomainEventMsg(out.event));
+            let level = session
+                .medals()
+                .level(&out.plan.medal)
+                .unwrap_or(MedalLevel::MIN);
+            abilities::spawn_medal(
+                &mut commands,
+                session,
+                &specs,
+                MedalUnit::new(out.plan.medal, level),
+                out.plan.origin,
+                out.plan.velocity,
+                &[Happening::Entered, Happening::Launched],
+                clock.now(),
+                &mut orders,
+                &mut events,
+            );
         },
         Ok(None) => {},
         Err(not_launchable) => debug!(%not_launchable, "fire intent ignored"),

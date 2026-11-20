@@ -1,6 +1,7 @@
 //! Infrastructure層: 定義データ、Repository実装、ユースケースを呼ぶSystem、Avianとの接続。
 //! Presentationを参照しない。外へは `port` を通じてだけ公開する。
 
+pub mod abilities;
 pub mod data;
 mod outgame;
 pub mod physics;

@@ -3,7 +3,7 @@
 use domain::{
     event::DomainEvent,
     evolution::Evolution,
-    id::MedalId,
+    id::MedalCode,
     launch::CatapultState,
     session::{GameSession, GameSessionError},
     spec::{MedalSpec, SpecCatalog},
@@ -13,7 +13,7 @@ use domain::{
 #[derive(Debug, Clone, PartialEq)]
 pub struct EvolveOutput {
     pub event: DomainEvent,
-    pub medal: Option<(MedalId, MedalSpec)>,
+    pub medal: Option<(MedalCode, MedalSpec)>,
 }
 
 /// 錬成で選択中のメダルを素材として消費したら、選択をノーマルへ戻す（所持しないメダルを撃たない）。
@@ -25,7 +25,7 @@ pub fn evolve(
 ) -> Result<EvolveOutput, GameSessionError> {
     let event = session.evolve(evolution, specs)?;
     if session.medals().level(catapult.selected()).is_none() {
-        catapult.select(MedalId::normal());
+        catapult.select(MedalCode::normal());
     }
     let medal = match &event {
         DomainEvent::Evolved { medal, .. } => session
@@ -56,7 +56,7 @@ mod tests {
         specs: &SpecCatalog,
         evolution: Evolution,
     ) -> Result<EvolveOutput, GameSessionError> {
-        session.medals_fell(1, specs);
+        session.medals_fell(1.0, specs);
         evolve(session, catapult, specs, evolution)
     }
 
@@ -72,7 +72,7 @@ mod tests {
                 &mut session,
                 &mut catapult,
                 &specs,
-                Evolution::LevelUp(MedalId::normal())
+                Evolution::LevelUp(MedalCode::normal())
             ),
             Err(GameSessionError::Evolution(EvolutionError::NotReady))
         );
@@ -89,13 +89,13 @@ mod tests {
             &mut session,
             &mut catapult,
             &specs,
-            Evolution::LevelUp(MedalId::normal()),
+            Evolution::LevelUp(MedalCode::normal()),
         )
         .expect("evolved");
         let level = MedalLevel::new(2).expect("valid");
-        assert_eq!(out.event, DomainEvent::Evolved { medal: MedalId::normal(), level });
-        assert_eq!(out.medal, Some((MedalId::normal(), levels()[1])));
-        assert_eq!(catapult.selected(), &MedalId::normal());
+        assert_eq!(out.event, DomainEvent::Evolved { medal: MedalCode::normal(), level });
+        assert_eq!(out.medal, Some((MedalCode::normal(), levels()[1])));
+        assert_eq!(catapult.selected(), &MedalCode::normal());
     }
 
     /// fire・water を取得して Lv.4 にし、fire を選んだ状態で錬成する。
@@ -107,7 +107,7 @@ mod tests {
     ) {
         let mut catapult = CatapultState::new(stage.catapult());
         for _ in 0..2 {
-            session.medals_fell(1, &specs);
+            session.medals_fell(1.0, &specs);
             let offer = session.evolution_offer().cloned().expect("offered");
             evolve(&mut session, &mut catapult, &specs, Evolution::Acquire(offer))
                 .expect("acquired");
@@ -124,7 +124,7 @@ mod tests {
             .expect("fused");
 
         assert_eq!(out.medal.map(|(m, _)| m), Some(sauna()));
-        assert_eq!(catapult.selected(), &MedalId::normal());
+        assert_eq!(catapult.selected(), &MedalCode::normal());
     }
 
     #[rstest]
@@ -134,7 +134,7 @@ mod tests {
         specs: SpecCatalog,
     ) {
         let mut catapult = CatapultState::new(stage.catapult());
-        session.medals_fell(1, &specs);
+        session.medals_fell(1.0, &specs);
         let offer = session.evolution_offer().cloned().expect("offered");
         evolve(&mut session, &mut catapult, &specs, Evolution::Acquire(offer.clone()))
             .expect("acquired");
@@ -168,14 +168,14 @@ mod tests {
     ) {
         let mut catapult = CatapultState::new(stage.catapult());
         session.advance(&stage, Tick(0));
-        session.medals_fell(1, &specs);
+        session.medals_fell(1.0, &specs);
         session.enemy_reached_goal(EnemyId(1), GoalId(1));
         assert_eq!(
             evolve(
                 &mut session,
                 &mut catapult,
                 &specs,
-                Evolution::LevelUp(MedalId::normal())
+                Evolution::LevelUp(MedalCode::normal())
             ),
             Err(GameSessionError::NotPlaying(session.status()))
         );

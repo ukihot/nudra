@@ -3,7 +3,7 @@
 
 use std::{
     collections::{BTreeMap, HashMap},
-    num::NonZeroU32,
+    num::{NonZeroU8, NonZeroU32},
 };
 
 use anyhow::{Context, bail};
@@ -18,15 +18,22 @@ use bevy::{
     },
 };
 use domain::{
+    ability::{
+        AbilityDef, Area, CollideWith, Direction, Effect, SpawnAt, SpawnKind, Target,
+        TransformInto, Trigger,
+    },
     difficulty::{Difficulty, UnknownDifficulty},
-    id::{BridgeId, EnemyTypeId, GoalId, MedalId, PusherCharacterId, RailId, StageId},
+    id::{BridgeId, EnemyTypeId, GoalId, MarkId, MedalCode, PusherCharacterId, RailId, StageId},
+    mark::{MarkDef, MarkError, Modifiers},
     math::Vec3,
     positive::{NotPositive, Positive},
     pusher::{MovementPattern, PusherCharacter, PusherStats},
+    reaction::ReactionDef,
     repository::{PusherCharacterRepository, StageRepository},
     spec::{
         EnemySpec, EvolutionRules, MedalDef, MedalSpec, MedalTier, SpecCatalog, SpecError,
         SpecParts,
+        abilities::{AbilityParts, MedalAbilities},
     },
     stage::{
         Abyss, Bridge, Catapult, CatapultParts, Geometry, Goal, InitialMedalPlacement, Rail, Shape,
@@ -166,6 +173,8 @@ pub struct SpecsAsset {
     enemies: Vec<EnemySpecDto>,
     fusions: Vec<(String, String, String)>,
     evolution: EvolutionDto,
+    #[serde(default)]
+    abilities: AbilitiesDto,
 }
 
 #[derive(Deserialize, Debug, Clone, Copy)]
@@ -208,6 +217,308 @@ struct EnemySpecDto {
     friction: f32,
 }
 
+// ── 能力・印・反応（基本設計 3.14）。時間はミリ秒で書き、読込時にTickへ変換する ──
+
+/// 値を写すだけの列挙の DTO と、Domain への変換。
+macro_rules! dto_enum {
+    ($dto:ident => $domain:ty { $($v:ident),* $(,)? }) => {
+        #[derive(Deserialize, Debug, Clone, Copy)]
+        enum $dto { $($v),* }
+
+        impl From<$dto> for $domain {
+            fn from(value: $dto) -> Self {
+                match value { $($dto::$v => Self::$v),* }
+            }
+        }
+    };
+}
+
+dto_enum!(TargetDto => Target { Itself, Medals, Enemies, Both });
+dto_enum!(DirectionDto => Direction { Outward, Inward, Forward, Backward, Up, Swirl, TowardAbyss });
+dto_enum!(CollideWithDto => CollideWith { Medals, Enemies, Any });
+dto_enum!(SpawnKindDto => SpawnKind { Same, Normal, RandomElement });
+dto_enum!(SpawnAtDto => SpawnAt { Here, Catapult, Sky });
+dto_enum!(TransformIntoDto => TransformInto { Normal, RandomElement });
+
+#[derive(Deserialize, Debug, Default)]
+#[serde(default)]
+struct AbilitiesDto {
+    /// Lv.1〜4 の倍率。省略時はすべて1
+    scale: Option<[f32; 4]>,
+    marks: Vec<MarkDto>,
+    reactions: Vec<ReactionDto>,
+    medals: BTreeMap<String, MedalAbilitiesDto>,
+}
+
+fn one() -> f32 {
+    1.0
+}
+
+fn one_count() -> u8 {
+    1
+}
+
+#[derive(Deserialize, Debug)]
+struct MarkDto {
+    id: String,
+    #[serde(default)]
+    harmful: bool,
+    #[serde(default = "one_count")]
+    max_stacks: u8,
+    #[serde(default)]
+    vanish: bool,
+    #[serde(default)]
+    friction: Option<f32>,
+    #[serde(default = "one")]
+    mass: f32,
+    #[serde(default = "one")]
+    size: f32,
+    #[serde(default = "one")]
+    speed: f32,
+    #[serde(default)]
+    heading: f32,
+    #[serde(default = "one")]
+    value: f32,
+    #[serde(default)]
+    sealed: bool,
+    #[serde(default)]
+    ghost: bool,
+}
+
+#[derive(Deserialize, Debug)]
+struct ReactionDto {
+    on: String,
+    by: String,
+    effects: Vec<EffectDto>,
+    #[serde(default)]
+    consume: bool,
+}
+
+#[derive(Deserialize, Debug, Default)]
+#[serde(default)]
+struct MedalAbilitiesDto {
+    base: Vec<AbilityDto>,
+    awaken: Vec<AbilityDto>,
+}
+
+#[derive(Deserialize, Debug)]
+struct AbilityDto {
+    on: TriggerDto,
+    target: TargetDto,
+    area: AreaDto,
+    effects: Vec<EffectDto>,
+    #[serde(default)]
+    uses: Option<u8>,
+}
+
+#[derive(Deserialize, Debug, Clone, Copy)]
+enum TriggerDto {
+    Always,
+    Launch,
+    Land,
+    Rest,
+    Wake,
+    Collide(CollideWithDto),
+    FuseMs(u64),
+    PeriodicMs(u64),
+    SelfFell,
+    OtherFell,
+}
+
+#[derive(Deserialize, Debug, Clone, Copy)]
+enum AreaDto {
+    Touched,
+    Radius(f32),
+    Front { length: f32, width: f32 },
+    Board,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+enum EffectDto {
+    Push {
+        dir: DirectionDto,
+        strength: f32,
+    },
+    /// `ms` を省略すると永続
+    Mark {
+        mark: String,
+        #[serde(default)]
+        ms: Option<u64>,
+    },
+    Cleanse {
+        harmful_only: bool,
+    },
+    Zone {
+        mark: String,
+        radius: f32,
+        ms: u64,
+        linger_ms: u64,
+    },
+    Spawn {
+        kind: SpawnKindDto,
+        #[serde(default = "one_count")]
+        count: u8,
+        at: SpawnAtDto,
+        #[serde(default)]
+        mark: Option<String>,
+        /// 生成したメダルに通常の進化報酬の資格を付ける（省略時はなし）
+        #[serde(default)]
+        rewarded: bool,
+    },
+    Transform(TransformIntoDto),
+    Remove,
+    Split,
+    Gauge(u32),
+    Revive(SpawnAtDto),
+    Replay,
+}
+
+fn ticks(ms: u64) -> Ticks {
+    Ticks::from_millis_ceil(ms, TICK_HZ)
+}
+
+fn count(n: u8) -> Result<NonZeroU8, DataError> {
+    NonZeroU8::new(n).ok_or(DataError::ZeroCount)
+}
+
+impl MarkDto {
+    fn to_domain(&self) -> Result<MarkDef, DataError> {
+        let modifiers = Modifiers {
+            friction: self.friction,
+            mass: pos(self.mass)?,
+            size: pos(self.size)?,
+            speed: self.speed,
+            heading: self.heading,
+            value: self.value,
+            sealed: self.sealed,
+            ghost: self.ghost,
+        };
+        Ok(MarkDef::new(
+            MarkId::new(&self.id),
+            self.harmful,
+            count(self.max_stacks)?,
+            self.vanish,
+            modifiers,
+        )?)
+    }
+}
+
+impl EffectDto {
+    fn to_domain(&self) -> Result<Effect, DataError> {
+        Ok(match self {
+            Self::Push { dir, strength } => {
+                Effect::Push { dir: (*dir).into(), strength: pos(*strength)? }
+            },
+            Self::Mark { mark, ms } => {
+                Effect::Mark { mark: MarkId::new(mark), duration: ms.map(ticks) }
+            },
+            Self::Cleanse { harmful_only } => Effect::Cleanse { harmful_only: *harmful_only },
+            Self::Zone { mark, radius, ms, linger_ms } => Effect::Zone {
+                mark: MarkId::new(mark),
+                radius: pos(*radius)?,
+                duration: ticks(*ms),
+                linger: ticks(*linger_ms),
+            },
+            Self::Spawn { kind, count: n, at, mark, rewarded } => Effect::Spawn {
+                kind: (*kind).into(),
+                count: count(*n)?,
+                at: (*at).into(),
+                mark: mark.as_deref().map(MarkId::new),
+                rewarded: *rewarded,
+            },
+            Self::Transform(into) => Effect::Transform((*into).into()),
+            Self::Remove => Effect::Remove,
+            Self::Split => Effect::Split,
+            Self::Gauge(points) => Effect::Gauge { points: *points },
+            Self::Revive(at) => Effect::Revive { at: (*at).into() },
+            Self::Replay => Effect::Replay,
+        })
+    }
+}
+
+fn effects(dtos: &[EffectDto]) -> Result<Vec<Effect>, DataError> {
+    dtos.iter().map(EffectDto::to_domain).collect()
+}
+
+impl AbilityDto {
+    fn to_domain(&self) -> Result<AbilityDef, DataError> {
+        let on = match self.on {
+            TriggerDto::Always => Trigger::Always,
+            TriggerDto::Launch => Trigger::Launch,
+            TriggerDto::Land => Trigger::Land,
+            TriggerDto::Rest => Trigger::Rest,
+            TriggerDto::Wake => Trigger::Wake,
+            TriggerDto::Collide(with) => Trigger::Collide(with.into()),
+            TriggerDto::FuseMs(ms) => Trigger::Fuse(ticks(ms)),
+            TriggerDto::PeriodicMs(ms) => Trigger::Periodic(ticks(ms)),
+            TriggerDto::SelfFell => Trigger::SelfFell,
+            TriggerDto::OtherFell => Trigger::OtherFell,
+        };
+        let area = match self.area {
+            AreaDto::Touched => Area::Touched,
+            AreaDto::Radius(r) => Area::Radius(pos(r)?),
+            AreaDto::Front { length, width } => {
+                Area::Front { length: pos(length)?, width: pos(width)? }
+            },
+            AreaDto::Board => Area::Board,
+        };
+        Ok(AbilityDef {
+            on,
+            target: self.target.into(),
+            area,
+            effects: effects(&self.effects)?,
+            uses: self.uses.map(count).transpose()?,
+        })
+    }
+}
+
+impl AbilitiesDto {
+    fn to_domain(&self) -> Result<AbilityParts, DataError> {
+        let abilities = |dtos: &[AbilityDto]| {
+            dtos.iter()
+                .map(AbilityDto::to_domain)
+                .collect::<Result<Vec<_>, _>>()
+        };
+        let reactions = self
+            .reactions
+            .iter()
+            .map(|r| {
+                Ok(ReactionDef {
+                    on: MarkId::new(&r.on),
+                    by: MarkId::new(&r.by),
+                    effects: effects(&r.effects)?,
+                    consume: r.consume,
+                })
+            })
+            .collect::<Result<_, DataError>>()?;
+        let medals = self
+            .medals
+            .iter()
+            .map(|(id, m)| {
+                let medal = MedalAbilities {
+                    base: abilities(&m.base)?,
+                    awaken: abilities(&m.awaken)?,
+                };
+                Ok((MedalCode::new(id), medal))
+            })
+            .collect::<Result<_, DataError>>()?;
+        let scale = match self.scale {
+            Some([a, b, c, d]) => [pos(a)?, pos(b)?, pos(c)?, pos(d)?],
+            None => AbilityParts::default().scale,
+        };
+        Ok(AbilityParts {
+            marks: self
+                .marks
+                .iter()
+                .map(MarkDto::to_domain)
+                .collect::<Result<_, _>>()?,
+            reactions,
+            medals,
+            scale,
+        })
+    }
+}
+
 // ── DTO → Domain ─────────────────────────────────────────
 
 #[derive(Debug, thiserror::Error)]
@@ -221,7 +532,11 @@ pub enum DataError {
     #[error(transparent)]
     Spec(#[from] SpecError),
     #[error("duplicate medal id: {0}")]
-    DuplicateMedal(MedalId),
+    DuplicateMedal(MedalCode),
+    #[error(transparent)]
+    Mark(#[from] MarkError),
+    #[error("count must be at least 1")]
+    ZeroCount,
 }
 
 fn v(a: [f32; 3]) -> Vec3 {
@@ -338,7 +653,7 @@ impl SpecsAsset {
     pub fn to_domain(&self) -> Result<SpecCatalog, DataError> {
         let mut medals = BTreeMap::new();
         for def in &self.medals {
-            let id = MedalId::new(&def.id);
+            let id = MedalCode::new(&def.id);
             let levels = def
                 .levels
                 .iter()
@@ -386,14 +701,15 @@ impl SpecsAsset {
             fusions: self
                 .fusions
                 .iter()
-                .map(|(a, b, result)| (MedalId::new(a), MedalId::new(b), MedalId::new(result)))
+                .map(|(a, b, result)| {
+                    (MedalCode::new(a), MedalCode::new(b), MedalCode::new(result))
+                })
                 .collect(),
             evolution: EvolutionRules {
                 threshold: self.evolution.threshold,
                 points_per_medal: self.evolution.points_per_medal,
             },
-            // 【未実装】能力の定義データは次の段階で読み込む（基本設計 3.14）
-            abilities: Default::default(),
+            abilities: self.abilities.to_domain()?,
         })?)
     }
 }
@@ -586,6 +902,64 @@ mod tests {
     }
 
     #[test]
+    fn bundled_abilities_load_with_marks_reactions_and_awakening() {
+        let catalog = specs_asset().to_domain().expect("valid specs");
+        let book = catalog.abilities();
+        let fire = MedalCode::new("fire");
+        assert_eq!(book.abilities(&fire, MedalLevel::MIN).len(), 1);
+        assert_eq!(book.abilities(&fire, MedalLevel::MAX).len(), 2, "awakened at level 4");
+        assert!(book.mark(&MarkId::new("wet")).is_some());
+        assert!(
+            book.abilities(&MedalCode::normal(), MedalLevel::MIN)
+                .is_empty()
+        );
+    }
+
+    fn abilities(ron_text: &str) -> Result<AbilityParts, DataError> {
+        ron::from_str::<AbilitiesDto>(ron_text)
+            .expect("valid RON")
+            .to_domain()
+    }
+
+    #[rstest]
+    #[case::invalid_mark(r#"(marks: [(id: "m", friction: Some(-1.0))])"#, "Mark")]
+    #[case::zero_stacks(r#"(marks: [(id: "m", max_stacks: 0)])"#, "ZeroCount")]
+    #[case::zero_spawn(r#"(medals: {"fire": (base: [(on: Launch, target: Itself, area: Touched, effects: [Spawn(kind: Normal, count: 0, at: Here)])])})"#, "ZeroCount")]
+    #[case::zero_uses(r#"(medals: {"fire": (base: [(on: Launch, target: Itself, area: Touched, effects: [], uses: Some(0))])})"#, "ZeroCount")]
+    #[case::negative_radius(r#"(medals: {"fire": (base: [(on: Launch, target: Itself, area: Radius(-1.0), effects: [])])})"#, "NotPositive")]
+    #[case::negative_strength(
+        r#"(reactions: [(on: "a", by: "b", effects: [Push(dir: Up, strength: 0.0)])])"#,
+        "NotPositive"
+    )]
+    #[case::zero_scale(r#"(scale: Some((1.0, 0.0, 1.0, 1.0)))"#, "NotPositive")]
+    fn invalid_ability_data_is_rejected(#[case] ron_text: &str, #[case] error: &str) {
+        let got = abilities(ron_text).expect_err("rejected");
+        assert!(format!("{got:?}").starts_with(error), "{got:?}");
+    }
+
+    #[test]
+    fn ability_times_are_converted_from_milliseconds() {
+        let parts = abilities(
+            r#"(scale: Some((1.0, 2.0, 3.0, 4.0)), medals: {"fire": (base: [(on: FuseMs(1000), target: Both, area: Front(length: 2.0, width: 1.0), effects: [Zone(mark: "m", radius: 1.0, ms: 500, linger_ms: 100), Mark(mark: "m")])])})"#,
+        )
+        .expect("valid");
+        let ability = &parts.medals[&MedalCode::new("fire")].base[0];
+        assert_eq!(ability.on, Trigger::Fuse(Ticks(60)));
+        assert_eq!(
+            ability.effects,
+            [
+                Effect::Zone {
+                    mark: MarkId::new("m"),
+                    radius: pos(1.0).expect("p"),
+                    duration: Ticks(30),
+                    linger: Ticks(6)
+                },
+                Effect::Mark { mark: MarkId::new("m"), duration: None },
+            ]
+        );
+        assert_eq!(parts.scale[3], pos(4.0).expect("p"));
+    }
+    #[test]
     fn bundled_specs_include_all_sixteen_elements_at_four_levels() {
         let asset = specs_asset();
         let catalog = asset.to_domain().expect("valid specs");
@@ -608,7 +982,7 @@ mod tests {
             serde_json::from_str(include_str!("../../locales/ja/medals.json"))
                 .expect("medal names");
         let id_for_name = |name: &str| {
-            MedalId::new(
+            MedalCode::new(
                 names
                     .iter()
                     .find(|(_, value)| value.as_str() == name)
@@ -651,12 +1025,12 @@ mod tests {
     fn casual_fusion_recipes_are_symmetric(#[case] a: &str, #[case] b: &str, #[case] result: &str) {
         let catalog = specs_asset().to_domain().expect("valid specs");
         assert_eq!(
-            catalog.fusion(&MedalId::new(a), &MedalId::new(b)),
-            Some(MedalId::new(result))
+            catalog.fusion(&MedalCode::new(a), &MedalCode::new(b)),
+            Some(MedalCode::new(result))
         );
         assert_eq!(
-            catalog.fusion(&MedalId::new(b), &MedalId::new(a)),
-            Some(MedalId::new(result))
+            catalog.fusion(&MedalCode::new(b), &MedalCode::new(a)),
+            Some(MedalCode::new(result))
         );
     }
 

@@ -179,7 +179,7 @@ impl Arg {
 }
 
 /// メダルIDは翻訳カタログのキーと共通。
-pub fn medal_name(medal: &domain::id::MedalId) -> I18nText {
+pub fn medal_name(medal: &domain::id::MedalCode) -> I18nText {
     I18nText::new("medals", medal.as_str())
 }
 

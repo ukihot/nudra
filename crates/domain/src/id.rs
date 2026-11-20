@@ -48,9 +48,9 @@ number_id!(
 /// メダル種のID（定義データで決まる。全89種、基本設計 3.13）。
 /// 大量のメダルEntityが持つため、複製は参照カウントの加算だけで済む `Arc<str>` にする。
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct MedalId(std::sync::Arc<str>);
+pub struct MedalCode(std::sync::Arc<str>);
 
-impl MedalId {
+impl MedalCode {
     /// 開始時に所持しているノーマルメダルのID（定義データで必須）
     pub const NORMAL: &str = "normal";
 
@@ -67,7 +67,7 @@ impl MedalId {
     }
 }
 
-impl fmt::Display for MedalId {
+impl fmt::Display for MedalCode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
     }

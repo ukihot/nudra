@@ -6,29 +6,52 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 use domain::{
     difficulty::Difficulty,
-    id::{EnemyId, GoalId, MedalId, PusherCharacterId, RailId},
-    launch::LaunchPlan,
+    evolution::MedalLevel,
+    id::{EnemyId, GoalId, MedalCode, PusherCharacterId, RailId},
+    mark::{Conditions, Modifiers},
+    motion::MedalMotion,
     navigation::Route,
     pusher::{MovementState, PusherStats},
     spec::{EnemySpec, MedalSpec},
     stage::{Shape, Stage},
+    unit::MedalUnit,
 };
 
-use super::physics::{Layer, layers};
+use super::{
+    abilities::AbilityTimers,
+    physics::{Layer, layers},
+};
 use crate::{
-    port::{Appearance, Silhouette},
+    port::{Appearance, MedalMotionState, Silhouette},
     state::AppState,
 };
 
 // ── Component（Domainの値を包むnewtype） ───────────────────
 
+/// メダル個体。種類・レベル・印・能力の使用回数（Domain の値、基本設計 3.16）。
 #[derive(Component, Debug, Clone)]
-pub struct MedalKind(pub MedalId);
+pub struct Medal(pub MedalUnit);
 
 /// Domain ID と Bevy Entity の関連付けはここだけ（基本設計 3.7）。
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Enemy {
     pub id: EnemyId,
+}
+
+/// 敵にかかっている印と、その効き目（歩行の速さ・進路に反映する、基本設計 3.14）。
+#[derive(Component, Debug, Clone)]
+pub struct EnemyMarks {
+    pub conditions: Conditions,
+    pub modifiers: Modifiers,
+}
+
+impl Default for EnemyMarks {
+    fn default() -> Self {
+        Self {
+            conditions: Conditions::default(),
+            modifiers: Modifiers::NONE,
+        }
+    }
 }
 
 #[derive(Component, Debug, Clone)]
@@ -65,7 +88,7 @@ const PUSHER_HEIGHT: f32 = 0.8;
 const PUSHER_THICKNESS: f32 = 0.5;
 const CATAPULT_SIZE: Vec3 = Vec3::new(1.2, 0.6, 1.2);
 
-fn in_game() -> DespawnOnExit<AppState> {
+pub(super) fn in_game() -> DespawnOnExit<AppState> {
     DespawnOnExit(AppState::InGame)
 }
 
@@ -166,42 +189,83 @@ pub fn spawn_stage(commands: &mut Commands, stage: &Stage, difficulty: Difficult
     ));
 }
 
-fn medal_bundle(medal: &MedalId, spec: &MedalSpec, transform: Transform) -> impl Bundle {
-    let (radius, thickness) = (spec.radius.get(), spec.thickness.get());
+/// メダルの物理特性（定義の値に印の効き目を掛けたもの）。
+pub struct MedalBody {
+    pub mass: Mass,
+    pub collider: Collider,
+    pub friction: Friction,
+    pub restitution: Restitution,
+    pub layers: CollisionLayers,
+    pub silhouette: Silhouette,
+}
+
+impl MedalBody {
+    /// すり抜け（`ghost`）のメダルは他のメダルと衝突しない。
+    pub fn new(spec: &MedalSpec, m: &Modifiers) -> Self {
+        let (radius, thickness) =
+            (spec.radius.get() * m.size.get(), spec.thickness.get() * m.size.get());
+        let layers = if m.ghost {
+            let base = layers(Layer::Medal);
+            CollisionLayers::new(base.memberships, base.filters & !LayerMask::from(Layer::Medal))
+        } else {
+            layers(Layer::Medal)
+        };
+        Self {
+            mass: Mass(spec.mass.get() * m.mass.get()),
+            collider: Collider::cylinder(radius, thickness),
+            friction: Friction::new(m.friction.unwrap_or(spec.friction)),
+            restitution: Restitution::new(spec.restitution),
+            layers,
+            silhouette: Silhouette::Cylinder { radius, height: thickness },
+        }
+    }
+}
+
+/// メダル1枚。`motion` は射出なら飛行中、置いたなら静止から始める。
+pub fn medal_bundle(
+    unit: MedalUnit,
+    spec: &MedalSpec,
+    modifiers: &Modifiers,
+    transform: Transform,
+    motion: MedalMotion,
+) -> impl Bundle {
+    let body = MedalBody::new(spec, modifiers);
     (
-        MedalKind(medal.clone()),
-        Appearance::new(
-            Appearance::medal_key(medal),
-            Silhouette::Cylinder { radius, height: thickness },
-        ),
+        Appearance::new(Appearance::medal_key(unit.medal()), body.silhouette),
+        Medal(unit),
+        MedalMotionState(motion),
+        AbilityTimers::default(),
         RigidBody::Dynamic,
-        Collider::cylinder(radius, thickness),
-        Mass(spec.mass.get()),
-        Friction::new(spec.friction),
-        Restitution::new(spec.restitution),
-        layers(Layer::Medal),
+        body.collider,
+        body.mass,
+        body.friction,
+        body.restitution,
+        body.layers,
         transform,
         in_game(),
     )
 }
 
-pub fn spawn_initial_medals(commands: &mut Commands, stage: &Stage, spec: &MedalSpec) {
+pub fn spawn_initial_medals(
+    commands: &mut Commands,
+    stage: &Stage,
+    level: MedalLevel,
+    spec: &MedalSpec,
+) {
     for p in stage
         .initial_medals()
         .iter()
         .flat_map(|placement| placement.positions())
     {
-        commands.spawn(medal_bundle(&MedalId::normal(), spec, Transform::from_translation(p)));
+        commands.spawn(medal_bundle(
+            MedalUnit::new(MedalCode::normal(), level),
+            spec,
+            &Modifiers::NONE,
+            Transform::from_translation(p),
+            MedalMotion::placed(),
+        ));
     }
 }
-
-pub fn spawn_launched_medal(commands: &mut Commands, plan: &LaunchPlan) {
-    commands.spawn((
-        medal_bundle(&plan.medal, &plan.spec, Transform::from_translation(plan.origin)),
-        LinearVelocity(plan.velocity),
-    ));
-}
-
 pub fn spawn_enemy(
     commands: &mut Commands,
     id: EnemyId,
@@ -214,6 +278,7 @@ pub fn spawn_enemy(
     let start = route.start() + Vec3::Y * height / 2.0;
     commands.spawn((
         Enemy { id },
+        EnemyMarks::default(),
         Navigation(route),
         Walker {
             max_speed: spec.max_speed,

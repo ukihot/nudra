@@ -6,9 +6,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
-    ability::{AbilityDef, Effect, Happening, ScaleError, SpawnKind, Trigger},
+    ability::{AbilityDef, Effect, Happening, ScaleError, SpawnKind, Target, Trigger},
     evolution::MedalLevel,
-    id::{MarkId, MedalId},
+    id::{MarkId, MedalCode},
     mark::{Conditions, MarkDef},
     positive::Positive,
     reaction::{Hit, ReactionDef, hit},
@@ -29,7 +29,7 @@ pub struct MedalAbilities {
 pub struct AbilityParts {
     pub marks: Vec<MarkDef>,
     pub reactions: Vec<ReactionDef>,
-    pub medals: BTreeMap<MedalId, MedalAbilities>,
+    pub medals: BTreeMap<MedalCode, MedalAbilities>,
     /// Lv.1〜4 の倍率（強さ・範囲・時間・ポイント）
     pub scale: [Positive; LEVELS],
 }
@@ -54,20 +54,26 @@ pub enum AbilityBookError {
     #[error("reaction of {0} by {1} is defined twice")]
     DuplicateReaction(MarkId, MarkId),
     #[error("abilities are defined for unknown medal {0}")]
-    UnknownMedal(MedalId),
+    UnknownMedal(MedalCode),
     #[error("an ability of {0} has a zero duration or interval")]
-    ZeroDuration(MedalId),
+    ZeroDuration(MedalCode),
     #[error("reaction of {0} by {1} has a zero duration")]
     ReactionZeroDuration(MarkId, MarkId),
     #[error("reaction of {0} by {1} cannot replay an ability")]
     ReplayInReaction(MarkId, MarkId),
     #[error("revival of {0} must be triggered by its own fall and limited in uses")]
-    InvalidRevive(MedalId),
+    InvalidRevive(MedalCode),
+    #[error("an ability of {0} could remove or replace an enemy (enemies leave only by falling)")]
+    EnemyExit(MedalCode),
+    #[error(
+        "reaction of {0} by {1} could remove or replace an enemy (enemies leave only by falling)"
+    )]
+    ReactionEnemyExit(MarkId, MarkId),
     #[error("{0} spawns medals with abilities without a limit (set uses or a sealing mark)")]
-    UnboundedSpawn(MedalId),
+    UnboundedSpawn(MedalCode),
     #[error("abilities of {medal} do not stay within range at some level")]
     Scale {
-        medal: MedalId,
+        medal: MedalCode,
         #[source]
         source: ScaleError,
     },
@@ -79,14 +85,14 @@ pub struct AbilityBook {
     marks: BTreeMap<MarkId, MarkDef>,
     reactions: Vec<ReactionDef>,
     /// メダル → Lv.1〜4 の能力（倍率と覚醒を適用済み）
-    medals: BTreeMap<MedalId, [Vec<AbilityDef>; LEVELS]>,
+    medals: BTreeMap<MedalCode, [Vec<AbilityDef>; LEVELS]>,
 }
 
 impl AbilityBook {
     /// `known` は定義済みのメダルか（メダルの物理特性の定義と突き合わせる）。
     pub fn new(
         parts: AbilityParts,
-        known: impl Fn(&MedalId) -> bool,
+        known: impl Fn(&MedalCode) -> bool,
     ) -> Result<Self, AbilityBookError> {
         let AbilityParts { marks: defs, reactions, medals: abilities, scale } = parts;
         let mut marks = BTreeMap::new();
@@ -103,6 +109,7 @@ impl AbilityBook {
                 Err(AbilityBookError::UnknownMark(id.clone()))
             }
         };
+        let vanishing = |m: &MarkId| marks.get(m).is_some_and(MarkDef::vanish);
         let check_marks = |effects: &[Effect]| {
             effects
                 .iter()
@@ -115,6 +122,9 @@ impl AbilityBook {
             known_mark(&r.on)?;
             known_mark(&r.by)?;
             check_marks(&r.effects)?;
+            if r.effects.iter().any(|e| exits_enemy(e, vanishing)) {
+                return Err(AbilityBookError::ReactionEnemyExit(r.on.clone(), r.by.clone()));
+            }
             if r.effects.contains(&Effect::Replay) {
                 return Err(AbilityBookError::ReplayInReaction(r.on.clone(), r.by.clone()));
             }
@@ -138,6 +148,14 @@ impl AbilityBook {
             }
             for ability in base.iter().chain(&awaken) {
                 check_marks(&ability.effects)?;
+                if matches!(ability.target, Target::Enemies | Target::Both)
+                    && ability
+                        .effects
+                        .iter()
+                        .any(|e| exits_enemy(e, vanishing))
+                {
+                    return Err(AbilityBookError::EnemyExit(medal));
+                }
                 for effect in &ability.effects {
                     match effect {
                         Effect::Revive { .. }
@@ -184,7 +202,7 @@ impl AbilityBook {
     }
 
     /// そのレベルで持つ能力。能力の無いメダルは空。
-    pub fn abilities(&self, medal: &MedalId, level: MedalLevel) -> &[AbilityDef] {
+    pub fn abilities(&self, medal: &MedalCode, level: MedalLevel) -> &[AbilityDef] {
         self.medals
             .get(medal)
             .map_or(&[], |levels| &levels[usize::from(level.get() - 1)])
@@ -193,14 +211,36 @@ impl AbilityBook {
     /// その出来事で発動する能力（番号つき。番号は [`crate::ability::AbilityRef`] に使う）。
     pub fn triggered(
         &self,
-        medal: &MedalId,
+        medal: &MedalCode,
         level: MedalLevel,
         happening: Happening,
     ) -> impl Iterator<Item = (usize, &AbilityDef)> {
         self.abilities(medal, level)
             .iter()
             .enumerate()
-            .filter(move |(_, a)| a.on.fires_on(happening))
+            .filter(move |(i, a)| match happening {
+                Happening::Due(due) => {
+                    *i == due && matches!(a.on, Trigger::Fuse(_) | Trigger::Periodic(_))
+                },
+                other => a.on.fires_on(other),
+            })
+    }
+
+    /// 時限・間隔の能力の予定 `(番号, 最初の時刻までの長さ, 繰り返しの間隔)`。ECS
+    /// が個体ごとに期限の Tick を持つ。
+    pub fn timers(
+        &self,
+        medal: &MedalCode,
+        level: MedalLevel,
+    ) -> impl Iterator<Item = (usize, Ticks, Option<Ticks>)> {
+        self.abilities(medal, level)
+            .iter()
+            .enumerate()
+            .filter_map(|(i, a)| match a.on {
+                Trigger::Fuse(after) => Some((i, after, None)),
+                Trigger::Periodic(every) => Some((i, every, Some(every))),
+                _ => None,
+            })
     }
 
     pub fn mark(&self, mark: &MarkId) -> Option<&MarkDef> {
@@ -210,6 +250,15 @@ impl AbilityBook {
     /// 効果が対象に当たったときの印と反応（[`crate::reaction::hit`]）。
     pub fn hit(&self, target: &mut Conditions, incoming: &[Effect], now: Tick) -> Hit {
         hit(target, incoming, now, |m| self.marks.get(m), &self.reactions)
+    }
+}
+
+/// 敵に当たると、敵を退場・置換させる効果か（敵の退場は奈落への落下だけ。基本設計 3.18）。
+fn exits_enemy(effect: &Effect, vanishing: impl Fn(&MarkId) -> bool) -> bool {
+    match effect {
+        Effect::Remove | Effect::Transform(_) | Effect::Split => true,
+        Effect::Mark { mark, .. } | Effect::Zone { mark, .. } => vanishing(mark),
+        _ => false,
     }
 }
 
@@ -250,8 +299,8 @@ mod tests {
         spec::fixture::{fire, water},
     };
 
-    fn known(m: &MedalId) -> bool {
-        [MedalId::normal(), fire(), water()].contains(m)
+    fn known(m: &MedalCode) -> bool {
+        [MedalCode::normal(), fire(), water()].contains(m)
     }
 
     fn lv(n: u8) -> MedalLevel {
@@ -285,6 +334,7 @@ mod tests {
             count: NonZeroU8::MIN,
             at: SpawnAt::Here,
             mark: mark.map(MarkId::new),
+            rewarded: false,
         }
     }
 
@@ -392,6 +442,31 @@ mod tests {
             0
         );
     }
+
+    #[rstest]
+    fn timed_abilities_are_scheduled_and_fire_when_due() {
+        let book = with(|x| {
+            *base(x) = vec![
+                ability(Trigger::Collide(CollideWith::Any), vec![blast(1.0)]),
+                ability(Trigger::Fuse(Ticks(90)), vec![blast(2.0)]),
+                ability(Trigger::Periodic(Ticks(30)), vec![blast(3.0)]),
+            ]
+        })
+        .expect("valid");
+        assert_eq!(
+            book.timers(&fire(), lv(1)).collect::<Vec<_>>(),
+            [(1, Ticks(90), None), (2, Ticks(30), Some(Ticks(30)))]
+        );
+        let due = |i| {
+            book.triggered(&fire(), lv(1), Happening::Due(i))
+                .map(|(i, _)| i)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(due(1), [1]);
+        assert_eq!(due(2), [2]);
+        assert_eq!(due(0), Vec::<usize>::new(), "a collision ability is never due");
+        assert_eq!(due(9), Vec::<usize>::new());
+    }
     #[rstest]
     fn medals_without_abilities_have_none() {
         assert!(book().abilities(&water(), lv(4)).is_empty());
@@ -427,7 +502,7 @@ mod tests {
     #[case::unknown_mark_in_reaction(|x: &mut AbilityParts| x.reactions[0].by = MarkId::new("ice"), AbilityBookError::UnknownMark(MarkId::new("ice")))]
     #[case::unknown_mark_in_reaction_effect(|x: &mut AbilityParts| x.reactions[0].effects.push(mark("ice", None)), AbilityBookError::UnknownMark(MarkId::new("ice")))]
     #[case::duplicate_reaction(|x: &mut AbilityParts| x.reactions.push(x.reactions[0].clone()), AbilityBookError::DuplicateReaction(MarkId::new("wet"), MarkId::new("poison")))]
-    #[case::unknown_medal(|x: &mut AbilityParts| { x.medals.insert(MedalId::new("ghost"), MedalAbilities::default()); }, AbilityBookError::UnknownMedal(MedalId::new("ghost")))]
+    #[case::unknown_medal(|x: &mut AbilityParts| { x.medals.insert(MedalCode::new("ghost"), MedalAbilities::default()); }, AbilityBookError::UnknownMedal(MedalCode::new("ghost")))]
     #[case::zero_fuse(|x: &mut AbilityParts| base(x).push(ability(Trigger::Fuse(Ticks(0)), vec![])), AbilityBookError::ZeroDuration(fire()))]
     #[case::zero_interval(|x: &mut AbilityParts| base(x).push(ability(Trigger::Periodic(Ticks(0)), vec![])), AbilityBookError::ZeroDuration(fire()))]
     #[case::zero_mark(|x: &mut AbilityParts| base(x).push(ability(Trigger::Collide(CollideWith::Any), vec![mark("wet", Some(0))])), AbilityBookError::ZeroDuration(fire()))]
@@ -439,6 +514,13 @@ mod tests {
     #[case::endless_revive(|x: &mut AbilityParts| base(x).push(ability(Trigger::SelfFell, vec![Effect::Revive { at: SpawnAt::Catapult }])), AbilityBookError::InvalidRevive(fire()))]
     #[case::endless_clones(|x: &mut AbilityParts| base(x).push(ability(Trigger::Periodic(Ticks(60)), vec![spawn(SpawnKind::Same, None)])), AbilityBookError::UnboundedSpawn(fire()))]
     #[case::endless_elements(|x: &mut AbilityParts| base(x).push(ability(Trigger::Collide(CollideWith::Any), vec![spawn(SpawnKind::RandomElement, Some("wet"))])), AbilityBookError::UnboundedSpawn(fire()))]
+    #[case::remove_enemies(|x: &mut AbilityParts| base(x).push(AbilityDef { target: Target::Enemies, ..ability(Trigger::Launch, vec![Effect::Remove]) }), AbilityBookError::EnemyExit(fire()))]
+    #[case::transform_both(|x: &mut AbilityParts| base(x).push(ability(Trigger::Launch, vec![Effect::Transform(TransformInto::Normal)])), AbilityBookError::EnemyExit(fire()))]
+    #[case::split_enemies(|x: &mut AbilityParts| base(x).push(AbilityDef { target: Target::Enemies, ..ability(Trigger::Launch, vec![Effect::Split]) }), AbilityBookError::EnemyExit(fire()))]
+    #[case::vanishing_mark_on_both(|x: &mut AbilityParts| base(x).push(ability(Trigger::Launch, vec![mark("poison", Some(5))])), AbilityBookError::EnemyExit(fire()))]
+    #[case::vanishing_zone_on_enemies(|x: &mut AbilityParts| base(x).push(AbilityDef { target: Target::Enemies, ..ability(Trigger::Launch, vec![Effect::Zone { mark: MarkId::new("poison"), radius: p(1.0), duration: Ticks(5), linger: Ticks(5) }]) }), AbilityBookError::EnemyExit(fire()))]
+    #[case::reaction_removes(|x: &mut AbilityParts| x.reactions[0].effects.push(Effect::Remove), AbilityBookError::ReactionEnemyExit(MarkId::new("wet"), MarkId::new("poison")))]
+    #[case::reaction_vanishing_mark(|x: &mut AbilityParts| x.reactions[0].effects.push(mark("poison", Some(5))), AbilityBookError::ReactionEnemyExit(MarkId::new("wet"), MarkId::new("poison")))]
     #[case::scale_overflow(|x: &mut AbilityParts| x.scale[3] = p(f32::MAX), AbilityBookError::Scale { medal: fire(), source: ScaleError(f32::MAX) })]
     fn invalid_definitions_are_rejected(
         #[case] edit: fn(&mut AbilityParts),
@@ -452,7 +534,10 @@ mod tests {
     #[case::sealed_clones(ability(Trigger::Periodic(Ticks(60)), vec![spawn(SpawnKind::Same, Some("sealed"))]))]
     #[case::normal_medals(ability(Trigger::Periodic(Ticks(60)), vec![spawn(SpawnKind::Normal, None)]))]
     #[case::limited_revive(AbilityDef { uses: NonZeroU8::new(2), ..ability(Trigger::SelfFell, vec![Effect::Revive { at: SpawnAt::Sky }]) })]
-    #[case::transform(ability(Trigger::Collide(CollideWith::Any), vec![Effect::Transform(TransformInto::RandomElement)]))]
+    #[case::remove_medals(AbilityDef { target: Target::Medals, ..ability(Trigger::Launch, vec![Effect::Remove]) })]
+    #[case::remove_itself(AbilityDef { target: Target::Itself, ..ability(Trigger::Launch, vec![Effect::Remove]) })]
+    #[case::vanishing_mark_on_medals(AbilityDef { target: Target::Medals, ..ability(Trigger::Launch, vec![mark("poison", Some(5))]) })]
+    #[case::transform(AbilityDef { target: Target::Medals, ..ability(Trigger::Collide(CollideWith::Any), vec![Effect::Transform(TransformInto::RandomElement)]) })]
     fn bounded_abilities_are_accepted(#[case] extra: AbilityDef) {
         assert!(with(|p| base(p).push(extra)).is_ok());
     }

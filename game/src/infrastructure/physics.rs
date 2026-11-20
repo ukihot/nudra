@@ -1,17 +1,15 @@
 //! Avian との接続（基本設計 5.4）。Avianへの依存はこのファイルと world.rs に閉じ込める。
 
-use std::{
-    collections::HashSet,
-    sync::atomic::{AtomicU32, Ordering},
-};
-
 use application::PhysicsFact;
 use avian3d::{dynamics::rigid_body::forces::ForcesItem, prelude::*};
-use bevy::prelude::*;
+use bevy::{prelude::*, utils::Parallel};
 use domain::{id::EnemyId, pusher::MovementPattern, stage::Rail};
 
-use super::world::{
-    AbyssZone, Enemy, GoalZone, MedalKind, Navigation, Pusher, PusherMotion, Walker,
+use super::{
+    abilities::FallenMedals,
+    world::{
+        AbyssZone, Enemy, EnemyMarks, GoalZone, Medal, Navigation, Pusher, PusherMotion, Walker,
+    },
 };
 
 /// 衝突レイヤー。組み合わせは [`layers`] で定義する。
@@ -61,21 +59,21 @@ const PUSHER_MAX_LEAD: f32 = 0.6;
 // ── 物理結果の収集 ────────────────────────────────────────
 
 /// センサーの接触開始と安全高度から、ゲーム判定に必要な事実を集める。
-/// メダルの落下をEntityごとに重複排除し、tick単位の枚数として渡す（基本設計 3.12）。
+/// 落ちたメダルはEntityごとに重複を除いて [`FallenMedals`]
+/// に積む（自分が落ちた能力・復活・価値の集計のため、 ここでは消さない。基本設計 3.16）。
 #[allow(clippy::too_many_arguments)]
 pub fn collect_facts(
     mut collisions: MessageReader<CollisionStart>,
     zones: Query<(Has<AbyssZone>, Option<&GoalZone>)>,
     enemies: Query<&Enemy>,
-    medals: Query<(), With<MedalKind>>,
+    medals: Query<(), With<Medal>>,
     fallen_enemies: Query<(&Position, &Enemy)>,
-    fallen_medals: Query<(Entity, &Position), With<MedalKind>>,
+    fallen_medals: Query<(Entity, &Position), With<Medal>>,
     kill_y: Res<KillPlane>,
     mut facts: ResMut<PendingFacts>,
-    mut commands: Commands,
-    par_commands: ParallelCommands,
+    mut fallen: ResMut<FallenMedals>,
+    mut below: Local<Parallel<Vec<Entity>>>,
 ) {
-    let mut fallen = HashSet::new();
     for c in collisions.read() {
         for (zone, other) in [(c.collider1, c.collider2), (c.collider2, c.collider1)] {
             let Ok((is_abyss, goal)) = zones.get(zone) else {
@@ -90,7 +88,7 @@ pub fn collect_facts(
                     None => {},
                 }
             } else if is_abyss && medals.contains(other) {
-                fallen.insert(other);
+                fallen.0.insert(other);
             }
         }
     }
@@ -100,27 +98,16 @@ pub fn collect_facts(
             facts.0.push(PhysicsFact::EnemyEnteredAbyss(enemy.id));
         }
     }
-    // メダルは数千枚になり得るため並列に調べる（共有の可変状態を持たず、除去は ParallelCommands
-    // で）
+    // メダルは数千枚になり得るため並列に調べる（共有の可変状態を持たず、スレッドごとのVecに積む）
     let kill_y = kill_y.0;
-    let safety_count = AtomicU32::new(0);
     fallen_medals
         .par_iter()
         .for_each(|(entity, position)| {
-            if position.y < kill_y && !fallen.contains(&entity) {
-                safety_count.fetch_add(1, Ordering::Relaxed);
-                par_commands.command_scope(|mut commands| commands.entity(entity).try_despawn());
+            if position.y < kill_y {
+                below.scope(|v| v.push(entity));
             }
         });
-    let count = u32::try_from(fallen.len())
-        .unwrap_or(u32::MAX)
-        .saturating_add(safety_count.into_inner());
-    for entity in fallen {
-        commands.entity(entity).try_despawn();
-    }
-    if count > 0 {
-        facts.0.push(PhysicsFact::MedalsFell(count));
-    }
+    fallen.0.extend(below.drain());
 }
 
 /// これより下に落ちた物体を除去する高さ。
@@ -148,12 +135,14 @@ pub fn despawn_enemies(
 /// 敵: 経路の進行方向へ、最大速度に達するまで歩行力を加える。
 /// 速度を直接上書きしないため、メダルに押し流される挙動が残る（要件7.1）。
 /// 各敵の計算は独立しているため並列に処理する。
-pub fn walk_enemies(mut enemies: Query<(&mut Navigation, &Walker, Forces)>) {
+pub fn walk_enemies(mut enemies: Query<(&mut Navigation, &Walker, Option<&EnemyMarks>, Forces)>) {
     enemies
         .par_iter_mut()
-        .for_each(|(mut nav, walker, mut forces)| {
-            let direction = nav.0.steer(forces.position());
-            if forces.linear_velocity().dot(direction) < walker.max_speed {
+        .for_each(|(mut nav, walker, marks, mut forces)| {
+            // 印の効き目: 進路のずれ（迷走・アチチ）と速さの倍率（0で足止め）
+            let m = super::abilities::enemy_walk(marks);
+            let direction = Quat::from_rotation_y(m.heading) * nav.0.steer(forces.position());
+            if forces.linear_velocity().dot(direction) < walker.max_speed * m.speed {
                 forces.apply_force(direction * walker.walk_force);
             }
         });

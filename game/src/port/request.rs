@@ -8,7 +8,7 @@ use bevy::prelude::*;
 use domain::{
     difficulty::Difficulty,
     evolution::Evolution,
-    id::{MedalId, PusherCharacterId, StageId},
+    id::{MedalCode, PusherCharacterId, StageId},
     progress::Language,
 };
 
@@ -39,7 +39,7 @@ pub enum Request {
         difficulty: Difficulty,
     },
     Evolve(Evolution),
-    SelectMedal(MedalId),
+    SelectMedal(MedalCode),
     /// リザルトからキャラクター選択へ戻る
     Menu,
 }

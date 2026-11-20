@@ -1,4 +1,4 @@
-// 錬成表の正本: docs/medal-fusions.csv。物理特性は検証用の仮値、属性の特殊効果は未実装。
+// 錬成表の正本: docs/medal-fusions.csv。物理特性は検証用の仮値、能力は末尾の abilities（一部はサンプル）。
 (
     evolution: (threshold: 100, points_per_medal: (4, 3, 2, 1)),
     medals: [
@@ -616,4 +616,43 @@
         (id: "brute", mass: 8.0, radius: 0.5, height: 1.4, max_speed: 0.8, walk_force: 40.0, friction: 0.8),
         (id: "boss", mass: 16.0, radius: 0.7, height: 1.8, max_speed: 0.6, walk_force: 60.0, friction: 0.8),
     ],
+    // 能力（基本設計 3.14〜3.16）。説明文の正本: docs/medal-abilities.csv。
+    // 【仮】動作確認用のサンプル。89種の割り当ては説明文と並べて確認してから書く。時間はミリ秒。
+    abilities: (
+        scale: Some((1.0, 1.25, 1.5, 2.0)),
+        marks: [
+            (id: "hot", harmful: true, speed: 0.4, heading: 0.5),
+            (id: "wet", friction: Some(0.05)),
+            (id: "sandy", harmful: true, friction: Some(1.2), speed: 0.6),
+            (id: "shine", value: 2.0),
+            (id: "shock", harmful: true, speed: 0.0),
+            (id: "steadfast", mass: 8.0),
+            (id: "grown", max_stacks: 5, mass: 1.5),
+        ],
+        reactions: [
+            // 濡れたところに雷: 感電して跳ね上がる
+            (on: "wet", by: "shock", effects: [Push(dir: Up, strength: 4.0)], consume: true),
+            // 熱いところに水: 蒸気でのぼせて止まる
+            (on: "hot", by: "wet", effects: [Mark(mark: "shock", ms: Some(800))], consume: true),
+        ],
+        medals: {
+            "fire": (
+                base: [(on: Land, target: Enemies, area: Touched, effects: [Zone(mark: "hot", radius: 1.2, ms: 4000, linger_ms: 1000)])],
+                awaken: [(on: Rest, target: Both, area: Radius(1.5), effects: [Push(dir: Outward, strength: 5.0)])],
+            ),
+            "water": (base: [(on: Collide(Any), target: Both, area: Radius(1.0), effects: [Mark(mark: "wet", ms: Some(5000))])]),
+            "sand": (base: [(on: Collide(Any), target: Both, area: Radius(1.0), effects: [Mark(mark: "sandy", ms: Some(4000))])]),
+            "light": (base: [(on: Land, target: Medals, area: Radius(1.5), effects: [Mark(mark: "shine", ms: Some(10000))])]),
+            "lightning": (base: [(on: Collide(Enemies), target: Both, area: Radius(1.5), effects: [Push(dir: Outward, strength: 6.0), Mark(mark: "shock", ms: Some(600))])]),
+            "wind": (base: [(on: Launch, target: Both, area: Front(length: 4.0, width: 1.5), effects: [Push(dir: Forward, strength: 5.0)])]),
+            "illusion": (base: [(on: Rest, target: Itself, area: Touched, effects: [Spawn(kind: Normal, at: Here)], uses: Some(1))]),
+            "star": (base: [(on: SelfFell, target: Itself, area: Touched, effects: [Gauge(5)])]),
+            "mountain": (base: [(on: Always, target: Itself, area: Touched, effects: [Mark(mark: "steadfast")])]),
+            "deja_vu": (base: [(on: Collide(Any), target: Both, area: Radius(1.0), effects: [Replay])]),
+            // 血: 誰かが（メダルでも敵でも）落ちるたびに育つ
+            "blood": (base: [(on: OtherFell, target: Itself, area: Touched, effects: [Mark(mark: "grown")])]),
+            // ゾンビ: 落ちてもカタパルトから1回だけ戻る（個体通算の復活上限も1回）
+            "zombie": (base: [(on: SelfFell, target: Itself, area: Touched, effects: [Revive(Catapult)], uses: Some(1))]),
+        },
+    ),
 )

@@ -6,7 +6,7 @@
 
 use domain::{
     event::DomainEvent,
-    id::MedalId,
+    id::MedalCode,
     launch::{CatapultState, LaunchPlan},
     session::{GameSession, GameSessionError},
     spec::SpecCatalog,
@@ -26,7 +26,7 @@ pub enum LaunchMedalError {
     #[error(transparent)]
     Session(#[from] GameSessionError),
     #[error("{0:?} medal is not owned")]
-    NotOwned(MedalId),
+    NotOwned(MedalCode),
 }
 
 pub fn launch_medal(
@@ -63,9 +63,9 @@ mod tests {
         stage: Stage,
         specs: SpecCatalog,
     ) {
-        session.medals_fell(1, &specs);
+        session.medals_fell(1.0, &specs);
         session
-            .evolve(Evolution::LevelUp(MedalId::normal()), &specs)
+            .evolve(Evolution::LevelUp(MedalCode::normal()), &specs)
             .expect("evolved");
         let mut state = CatapultState::new(stage.catapult());
 
@@ -73,7 +73,7 @@ mod tests {
             .expect("playing")
             .expect("ready");
 
-        assert_eq!(out.event, DomainEvent::MedalLaunched { medal: MedalId::normal() });
+        assert_eq!(out.event, DomainEvent::MedalLaunched { medal: MedalCode::normal() });
         assert_eq!(out.plan.spec, levels()[1], "level 2 spec");
         assert_eq!(out.plan.origin, stage.catapult().position());
     }
@@ -124,7 +124,7 @@ mod tests {
         stage: Stage,
         specs: SpecCatalog,
     ) {
-        session.medals_fell(1, &specs);
+        session.medals_fell(1.0, &specs);
         let mut state = CatapultState::new(stage.catapult());
         let before = state.clone();
         assert_eq!(

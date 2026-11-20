@@ -236,9 +236,9 @@ mod tests {
         match kind(n) {
             RequestKind::Start => start("a"),
             RequestKind::Evolve => Request::Evolve(domain::evolution::Evolution::LevelUp(
-                domain::id::MedalId::normal(),
+                domain::id::MedalCode::normal(),
             )),
-            RequestKind::SelectMedal => Request::SelectMedal(domain::id::MedalId::normal()),
+            RequestKind::SelectMedal => Request::SelectMedal(domain::id::MedalCode::normal()),
             RequestKind::Menu => Request::Menu,
             RequestKind::Navigate => Request::Navigate(crate::port::OutgameScreen::Title),
             RequestKind::SetLanguage => Request::SetLanguage(domain::progress::Language::Japanese),

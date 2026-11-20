@@ -9,7 +9,7 @@ use std::num::NonZeroU8;
 
 use crate::{
     evolution::MedalLevel,
-    id::{MarkId, MedalId},
+    id::{MarkId, MedalCode},
     motion::MotionEvent,
     positive::Positive,
     time::Ticks,
@@ -55,14 +55,19 @@ pub enum Partner {
     Enemy,
 }
 
-/// メダルに起きた出来事。時間で起きるもの（時限・間隔）と常時は、ECS がスケジュールする。
+/// メダルに起きた出来事。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Happening {
+    /// 盤面に出た（射出・生成・初期配置）。常時の能力（[`Trigger::Always`]）が発動する
+    Entered,
     Launched,
     Motion(MotionEvent),
     Collided(Partner),
     SelfFell,
     OtherFell,
+    /// 時限・間隔の能力（番号）の時刻が来た。予定は [`crate::spec::abilities::AbilityBook::timers`]
+    /// で引く
+    Due(usize),
 }
 
 impl Trigger {
@@ -71,7 +76,8 @@ impl Trigger {
         use Happening as H;
         matches!(
             (self, happening),
-            (Self::Launch, H::Launched)
+            (Self::Always, H::Entered)
+                | (Self::Launch, H::Launched)
                 | (Self::Land, H::Motion(MotionEvent::Landed))
                 | (Self::Rest, H::Motion(MotionEvent::Rested))
                 | (Self::Wake, H::Motion(MotionEvent::Woke))
@@ -173,6 +179,9 @@ pub enum Effect {
         count: NonZeroU8,
         at: SpawnAt,
         mark: Option<MarkId>,
+        /// 生成したメダルに通常の進化報酬の資格を付ける（既定はなし。有価生成は回数・
+        /// 報酬量と合わせてレビューする、基本設計 3.18）
+        rewarded: bool,
     },
     Transform(TransformInto),
     /// 対象を消す（取り込む・食べる）。消えたメダルは落下と同じには数えない
@@ -194,6 +203,12 @@ pub enum Effect {
 
 impl Effect {
     /// 対象の状態（印）だけを変える効果か。物理や盤面の変更を伴わない。
+    /// メダルを浮かせる効果か（上へ押す）。浮いたメダルは飛行中に戻り、
+    /// 着地でまた発動する（[`crate::motion::MedalMotion::lift`]）。
+    pub fn lifts(&self) -> bool {
+        matches!(self, Self::Push { dir: Direction::Up, .. })
+    }
+
     pub fn is_state(&self) -> bool {
         matches!(self, Self::Mark { .. } | Self::Cleanse { .. })
     }
@@ -223,7 +238,7 @@ pub struct AbilityDef {
 /// 発動した能力の参照（どのメダルの、どのレベルの、何番目の能力か）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AbilityRef {
-    pub medal: MedalId,
+    pub medal: MedalCode,
     pub level: MedalLevel,
     pub index: usize,
 }
@@ -332,6 +347,7 @@ mod tests {
                 count: NonZeroU8::MIN,
                 at: SpawnAt::Here,
                 mark: None,
+                rewarded: false,
             },
             Effect::Remove,
         ]
@@ -366,6 +382,7 @@ mod tests {
                     count: NonZeroU8::MIN,
                     at: SpawnAt::Here,
                     mark: None,
+                    rewarded: false,
                 },
                 Effect::Remove,
             ]
@@ -456,6 +473,9 @@ mod tests {
     #[case::self_fell(Trigger::SelfFell, Happening::SelfFell, true)]
     #[case::other_fell(Trigger::OtherFell, Happening::OtherFell, true)]
     #[case::own_fall_is_not_other(Trigger::OtherFell, Happening::SelfFell, false)]
+    #[case::always_on_entering(Trigger::Always, Happening::Entered, true)]
+    #[case::launch_is_not_entering(Trigger::Launch, Happening::Entered, false)]
+    #[case::due_is_matched_by_index_not_here(Trigger::Fuse(Ticks(1)), Happening::Due(0), false)]
     #[case::always_is_scheduled(Trigger::Always, Happening::Launched, false)]
     #[case::fuse_is_scheduled(Trigger::Fuse(Ticks(1)), Happening::Launched, false)]
     #[case::periodic_is_scheduled(Trigger::Periodic(Ticks(1)), Happening::Motion(Rested), false)]
@@ -465,6 +485,14 @@ mod tests {
         #[case] fires: bool,
     ) {
         assert_eq!(trigger.fires_on(happening), fires);
+    }
+
+    #[rstest]
+    #[case::up(Effect::Push { dir: Direction::Up, strength: p(1.0) }, true)]
+    #[case::outward(Effect::Push { dir: Direction::Outward, strength: p(1.0) }, false)]
+    #[case::remove(Effect::Remove, false)]
+    fn only_upward_pushes_lift(#[case] effect: Effect, #[case] lifts: bool) {
+        assert_eq!(effect.lifts(), lifts);
     }
     #[rstest]
     fn only_marks_and_cleansing_are_state_effects() {

@@ -8,7 +8,8 @@ use domain::{
     difficulty::Difficulty,
     event::DomainEvent,
     evolution::EvolutionChoice,
-    id::{EnemyId, GoalId, MedalId, PusherCharacterId, StageId},
+    id::{EnemyId, GoalId, MedalCode, PusherCharacterId, StageId},
+    motion::MedalMotion,
     progress::Language,
 };
 
@@ -91,8 +92,8 @@ pub struct EvolutionModel(pub Vec<EvolutionChoice>);
 
 #[derive(Resource, Debug, Clone, Default, PartialEq)]
 pub struct MedalModel {
-    pub owned: Vec<MedalId>,
-    pub selected: Option<MedalId>,
+    pub owned: Vec<MedalCode>,
+    pub selected: Option<MedalCode>,
 }
 
 /// 照準表示用の値。
@@ -122,3 +123,9 @@ pub enum GameResult {
         play_time: Duration,
     },
 }
+
+/// メダルの挙動ステータス（飛行中・転がり中・静止、基本設計 3.15）。Infrastructure
+/// が物理から更新し、 Presentation
+/// はアニメ・アセットの切り替えに読む。能力の発動も同じ値で決まるため、見た目とずれない。
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MedalMotionState(pub MedalMotion);

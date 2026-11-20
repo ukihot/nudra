@@ -8,7 +8,7 @@ use std::{
 use domain::{
     difficulty::Difficulty,
     id::{
-        BridgeId, EnemyTypeId, GameSessionId, GoalId, MedalId, PusherCharacterId, RailId, StageId,
+        BridgeId, EnemyTypeId, GameSessionId, GoalId, MedalCode, PusherCharacterId, RailId, StageId,
     },
     math::Vec3,
     positive::Positive,
@@ -41,14 +41,14 @@ mockall::mock! {
     }
 }
 
-pub fn fire() -> MedalId {
-    MedalId::new("fire")
+pub fn fire() -> MedalCode {
+    MedalCode::new("fire")
 }
-pub fn water() -> MedalId {
-    MedalId::new("water")
+pub fn water() -> MedalCode {
+    MedalCode::new("water")
 }
-pub fn sauna() -> MedalId {
-    MedalId::new("sauna")
+pub fn sauna() -> MedalCode {
+    MedalCode::new("sauna")
 }
 
 pub fn spawn(at_tick: u64) -> SpawnEntry {
@@ -159,7 +159,7 @@ pub fn spec_parts() -> SpecParts {
     };
     SpecParts {
         medals: BTreeMap::from([
-            (MedalId::normal(), def(MedalTier::Normal)),
+            (MedalCode::normal(), def(MedalTier::Normal)),
             (fire(), def(MedalTier::Element)),
             (water(), def(MedalTier::Element)),
             (sauna(), def(MedalTier::Fusion)),
@@ -195,4 +195,58 @@ pub fn session(stage: Stage, character: PusherCharacter, specs: SpecCatalog) -> 
 /// テスト用の簡潔な生成。不正値ならパニックする。
 pub fn p(value: f32) -> Positive {
     Positive::new(value).expect("positive")
+}
+
+pub fn lv(n: u8) -> domain::evolution::MedalLevel {
+    domain::evolution::MedalLevel::new(n).expect("valid level")
+}
+
+/// 印: 濡れ（滑る）・しびれ（足止め）・焦げ（切れると消える）。濡れ + しびれ → 跳ね上がる。
+/// fire: 衝突で爆風と濡れ（60tick）。
+pub fn ability_specs() -> SpecCatalog {
+    use std::num::NonZeroU8;
+
+    use domain::{
+        ability::{AbilityDef, Area, CollideWith, Direction, Effect, Target, Trigger},
+        id::MarkId,
+        mark::{MarkDef, Modifiers},
+        reaction::ReactionDef,
+        spec::abilities::MedalAbilities,
+    };
+
+    let mark = |id: &str, vanish, modifiers| {
+        MarkDef::new(MarkId::new(id), false, NonZeroU8::MIN, vanish, modifiers).expect("valid mark")
+    };
+    let mut parts = spec_parts();
+    parts.abilities.marks = vec![
+        mark("wet", false, Modifiers { friction: Some(0.05), ..Modifiers::NONE }),
+        mark("shock", false, Modifiers { speed: 0.0, ..Modifiers::NONE }),
+        mark("burn", true, Modifiers::NONE),
+    ];
+    parts.abilities.reactions = vec![ReactionDef {
+        on: MarkId::new("wet"),
+        by: MarkId::new("shock"),
+        effects: vec![Effect::Push { dir: Direction::Up, strength: p(3.0) }],
+        consume: false,
+    }];
+    parts.abilities.medals = BTreeMap::from([(
+        fire(),
+        MedalAbilities {
+            base: vec![AbilityDef {
+                on: Trigger::Collide(CollideWith::Any),
+                target: Target::Both,
+                area: Area::Radius(p(1.0)),
+                effects: vec![
+                    Effect::Push { dir: Direction::Outward, strength: p(2.0) },
+                    Effect::Mark {
+                        mark: MarkId::new("wet"),
+                        duration: Some(Ticks(60)),
+                    },
+                ],
+                uses: None,
+            }],
+            awaken: vec![],
+        },
+    )]);
+    SpecCatalog::new(parts).expect("valid specs")
 }

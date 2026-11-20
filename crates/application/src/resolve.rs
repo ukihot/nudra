@@ -8,12 +8,13 @@ use domain::{
 };
 
 /// Infrastructureがセンサー接触から作る、ゲーム判定に必要な物理上の事実。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PhysicsFact {
     EnemyEnteredAbyss(EnemyId),
     EnemyEnteredGoal(EnemyId, GoalId),
-    /// このtickに奈落へ落ちたメダルの枚数（大量の接触を1件に集計して渡す、基本設計 3.12）
-    MedalsFell(u32),
+    /// このtickに奈落へ落ちた（消えた）メダルの価値の合計。ノーマルは1枚1.
+    /// 0（大量の接触を1件に集計する、基本設計 3.12）
+    MedalsFell(f32),
 }
 
 /// `facts` を消費して判定する。同じtickでは落下（撃破）を到達より先に処理する（基本設計 3.4）。
@@ -31,7 +32,7 @@ pub fn resolve_physics(
             PhysicsFact::EnemyEnteredGoal(enemy, goal) => {
                 events.extend(session.enemy_reached_goal(enemy, goal))
             },
-            PhysicsFact::MedalsFell(count) => events.extend(session.medals_fell(count, specs)),
+            PhysicsFact::MedalsFell(value) => events.extend(session.medals_fell(value, specs)),
         }
     }
     events
@@ -101,7 +102,8 @@ mod tests {
     fn falling_medals_fill_the_evolution_gauge(session: GameSession) {
         let mut session = session;
         // Easy は1枚10ポイント、10で満タン（test_support）
-        let events = resolve_physics(&mut session, &mut vec![PhysicsFact::MedalsFell(1)], &specs());
+        let events =
+            resolve_physics(&mut session, &mut vec![PhysicsFact::MedalsFell(1.0)], &specs());
         assert_eq!(events, [DomainEvent::EvolutionReady]);
         assert!(session.gauge().is_full());
     }

@@ -8,7 +8,7 @@
 
 use std::{collections::BTreeMap, num::NonZeroU32};
 
-use crate::id::MedalId;
+use crate::id::MedalCode;
 
 /// メダル種のレベル（1〜4）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -81,10 +81,10 @@ impl EvolutionGauge {
 /// 進化の選択肢。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Evolution {
-    LevelUp(MedalId),
-    Fuse(MedalId, MedalId),
+    LevelUp(MedalCode),
+    Fuse(MedalCode, MedalCode),
     /// 進化画面の New!: 提示された未所持のメダルを Lv.1 で得る
-    Acquire(MedalId),
+    Acquire(MedalCode),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -92,21 +92,21 @@ pub enum EvolutionError {
     #[error("evolution gauge is not full yet")]
     NotReady,
     #[error("{0} medal is not owned")]
-    NotOwned(MedalId),
+    NotOwned(MedalCode),
     #[error("{0} medal is already at the max level")]
-    AtMaxLevel(MedalId),
+    AtMaxLevel(MedalCode),
     #[error("{0} medal must be at the max level to fuse")]
-    NotMaxLevel(MedalId),
+    NotMaxLevel(MedalCode),
     #[error("a medal cannot be fused with itself")]
     SameMedal,
     #[error("no fusion recipe for {0} + {1}")]
-    NoRecipe(MedalId, MedalId),
+    NoRecipe(MedalCode, MedalCode),
     #[error("fusion result {0} is already owned")]
-    ResultAlreadyOwned(MedalId),
+    ResultAlreadyOwned(MedalCode),
     #[error("{0} is not the offered new medal")]
-    NotOffered(MedalId),
+    NotOffered(MedalCode),
     #[error("{0} medal is already owned")]
-    AlreadyOwned(MedalId),
+    AlreadyOwned(MedalCode),
 }
 
 /// 進化画面の選択肢。`available` が偽なら表示だけする（錬成素材のレベル不足・結果を所持済み）。
@@ -114,34 +114,34 @@ pub enum EvolutionError {
 pub struct EvolutionChoice {
     pub evolution: Evolution,
     /// 選んだ結果のメダル種（レベルアップは同じ種、錬成は結果の種、New! は獲得する種）
-    pub result: MedalId,
+    pub result: MedalCode,
     pub available: bool,
 }
 
 /// 進化の結果: どのメダル種が何レベルになったか。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Evolved {
-    pub medal: MedalId,
+    pub medal: MedalCode,
     pub level: MedalLevel,
 }
 
 /// セッション中に所持しているメダル種とレベル。開始時はノーマル Lv.1。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MedalCollection(BTreeMap<MedalId, MedalLevel>);
+pub struct MedalCollection(BTreeMap<MedalCode, MedalLevel>);
 
 impl Default for MedalCollection {
     fn default() -> Self {
-        Self(BTreeMap::from([(MedalId::normal(), MedalLevel::MIN)]))
+        Self(BTreeMap::from([(MedalCode::normal(), MedalLevel::MIN)]))
     }
 }
 
 impl MedalCollection {
-    pub fn level(&self, medal: &MedalId) -> Option<MedalLevel> {
+    pub fn level(&self, medal: &MedalCode) -> Option<MedalLevel> {
         self.0.get(medal).copied()
     }
 
     /// 所持しているメダル種（ID順）。
-    pub fn owned(&self) -> impl Iterator<Item = (&MedalId, MedalLevel)> {
+    pub fn owned(&self) -> impl Iterator<Item = (&MedalCode, MedalLevel)> {
         self.0.iter().map(|(m, l)| (m, *l))
     }
 
@@ -150,8 +150,8 @@ impl MedalCollection {
     pub fn evolve(
         &mut self,
         evolution: Evolution,
-        recipe: impl Fn(&MedalId, &MedalId) -> Option<MedalId>,
-        offered: Option<&MedalId>,
+        recipe: impl Fn(&MedalCode, &MedalCode) -> Option<MedalCode>,
+        offered: Option<&MedalCode>,
     ) -> Result<Evolved, EvolutionError> {
         // 検証がすべて済んでから変更する（全か無か）
         let evolved = self.check(&evolution, recipe, offered)?;
@@ -167,8 +167,8 @@ impl MedalCollection {
     pub fn check(
         &self,
         evolution: &Evolution,
-        recipe: impl Fn(&MedalId, &MedalId) -> Option<MedalId>,
-        offered: Option<&MedalId>,
+        recipe: impl Fn(&MedalCode, &MedalCode) -> Option<MedalCode>,
+        offered: Option<&MedalCode>,
     ) -> Result<Evolved, EvolutionError> {
         match evolution {
             Evolution::Acquire(medal) => {
@@ -219,12 +219,12 @@ mod tests {
 
     use super::*;
 
-    fn m(id: &str) -> MedalId {
-        MedalId::new(id)
+    fn m(id: &str) -> MedalCode {
+        MedalCode::new(id)
     }
 
     /// normal + fire → heavy（順序は問わない）
-    fn recipes(a: &MedalId, b: &MedalId) -> Option<MedalId> {
+    fn recipes(a: &MedalCode, b: &MedalCode) -> Option<MedalCode> {
         let mut pair = [a.as_str(), b.as_str()];
         pair.sort_unstable();
         (pair == ["fire", "normal"]).then(|| m("heavy"))
@@ -263,16 +263,16 @@ mod tests {
         let start = MedalCollection::default();
         assert_eq!(
             start.owned().collect::<Vec<_>>(),
-            [(&MedalId::normal(), MedalLevel::MIN)]
+            [(&MedalCode::normal(), MedalLevel::MIN)]
         );
     }
 
     #[rstest]
     fn level_up_raises_one_level() {
         let mut medals = MedalCollection::default();
-        let evolved = medals.evolve(Evolution::LevelUp(MedalId::normal()), recipes, None);
-        assert_eq!(evolved, Ok(Evolved { medal: MedalId::normal(), level: lv(2) }));
-        assert_eq!(medals.level(&MedalId::normal()), Some(lv(2)));
+        let evolved = medals.evolve(Evolution::LevelUp(MedalCode::normal()), recipes, None);
+        assert_eq!(evolved, Ok(Evolved { medal: MedalCode::normal(), level: lv(2) }));
+        assert_eq!(medals.level(&MedalCode::normal()), Some(lv(2)));
     }
 
     #[rstest]

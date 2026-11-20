@@ -806,7 +806,7 @@ PusherCharacter [Aggregate Root]
 ### 主な構成
 
 Medal
-├── MedalId [VO]
+├── MedalCode [VO]
 ├── MedalType [VO]
 ├── PhysicalProperties [VO]
 └── Transform [VO]

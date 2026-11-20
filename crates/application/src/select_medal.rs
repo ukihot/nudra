@@ -1,7 +1,7 @@
 //! 射出するメダル種の選択（基本設計 3.12）。
 
 use domain::{
-    id::MedalId,
+    id::MedalCode,
     launch::CatapultState,
     session::{GameSession, GameSessionError},
 };
@@ -12,14 +12,14 @@ pub enum SelectMedalError {
     #[error(transparent)]
     Session(#[from] GameSessionError),
     #[error("{0} medal is not owned")]
-    NotOwned(MedalId),
+    NotOwned(MedalCode),
 }
 
 /// 失敗時は選択を変えない。
 pub fn select_medal(
     session: &GameSession,
     catapult: &mut CatapultState,
-    medal: MedalId,
+    medal: MedalCode,
 ) -> Result<(), SelectMedalError> {
     session.ensure_running()?;
     if session.medals().level(&medal).is_none() {
@@ -44,8 +44,8 @@ mod tests {
     use crate::test_support::{fire, session, specs, stage};
 
     /// New! で提示された素材を取得する（test_support: Easy は1枚で満タン）。
-    fn acquire_offer(session: &mut GameSession, specs: &SpecCatalog) -> MedalId {
-        session.medals_fell(1, specs);
+    fn acquire_offer(session: &mut GameSession, specs: &SpecCatalog) -> MedalCode {
+        session.medals_fell(1.0, specs);
         let offer = session.evolution_offer().cloned().expect("offered");
         session
             .evolve(Evolution::Acquire(offer.clone()), specs)
@@ -68,7 +68,7 @@ mod tests {
             select_medal(&session, &mut catapult, fire()),
             Err(SelectMedalError::NotOwned(fire()))
         );
-        assert_eq!(catapult.selected(), &MedalId::normal());
+        assert_eq!(catapult.selected(), &MedalCode::normal());
     }
 
     #[rstest]
@@ -77,10 +77,10 @@ mod tests {
         stage: Stage,
         specs: SpecCatalog,
     ) {
-        session.medals_fell(1, &specs);
+        session.medals_fell(1.0, &specs);
         let mut catapult = CatapultState::new(stage.catapult());
         assert_eq!(
-            select_medal(&session, &mut catapult, MedalId::normal()),
+            select_medal(&session, &mut catapult, MedalCode::normal()),
             Err(SelectMedalError::Session(GameSessionError::EvolutionPending))
         );
     }
@@ -91,7 +91,7 @@ mod tests {
         session.enemy_reached_goal(EnemyId(1), GoalId(1));
         let mut catapult = CatapultState::new(stage.catapult());
         assert_eq!(
-            select_medal(&session, &mut catapult, MedalId::normal()),
+            select_medal(&session, &mut catapult, MedalCode::normal()),
             Err(SelectMedalError::Session(GameSessionError::NotPlaying(
                 session.status()
             )))

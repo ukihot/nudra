@@ -4,11 +4,11 @@
 //! 意図がある間は毎tick `fire` を評価し、クールダウンが明けたときだけ発射する。
 //! クールダウン中に発射されないのは却下（エラー）ではなく、まだ条件が成立していないだけ。
 
-use crate::{id::MedalId, math::Vec3, spec::MedalSpec, stage::Catapult, time::Tick};
+use crate::{id::MedalCode, math::Vec3, spec::MedalSpec, stage::Catapult, time::Tick};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LaunchPlan {
-    pub medal: MedalId,
+    pub medal: MedalCode,
     pub spec: MedalSpec,
     pub origin: Vec3,
     pub velocity: Vec3,
@@ -17,7 +17,7 @@ pub struct LaunchPlan {
 #[derive(Debug, Clone, PartialEq)]
 pub struct CatapultState {
     yaw: f32,
-    selected: MedalId,
+    selected: MedalCode,
     /// 次に発射できるTick（期限）。毎tick残り時間を減らさず、現在のTickと比較する
     next_fire: Tick,
 }
@@ -27,7 +27,7 @@ impl CatapultState {
     pub fn new(catapult: &Catapult) -> Self {
         Self {
             yaw: catapult.initial_yaw(),
-            selected: MedalId::normal(),
+            selected: MedalCode::normal(),
             next_fire: Tick::ZERO,
         }
     }
@@ -36,7 +36,7 @@ impl CatapultState {
         self.yaw
     }
 
-    pub fn selected(&self) -> &MedalId {
+    pub fn selected(&self) -> &MedalCode {
         &self.selected
     }
 
@@ -45,7 +45,7 @@ impl CatapultState {
         self.yaw = catapult.clamp_yaw(self.yaw + delta);
     }
 
-    pub fn select(&mut self, medal: MedalId) {
+    pub fn select(&mut self, medal: MedalCode) {
         self.selected = medal;
     }
 
@@ -105,7 +105,7 @@ mod tests {
             Catapult::new(CatapultParts { initial_yaw: 0.25, ..catapult_parts() }).expect("valid");
         let state = CatapultState::new(&catapult);
         assert_eq!(state.yaw(), 0.25);
-        assert_eq!(state.selected(), &MedalId::normal());
+        assert_eq!(state.selected(), &MedalCode::normal());
         assert!(state.is_ready(Tick::ZERO));
     }
 
@@ -117,7 +117,7 @@ mod tests {
             .fire(stage.catapult(), &medal(), Tick::ZERO)
             .expect("ready");
         assert_eq!(plan.origin, stage.catapult().position());
-        assert_eq!(plan.medal, MedalId::normal());
+        assert_eq!(plan.medal, MedalCode::normal());
         assert!(plan.velocity.z < 0.0 && plan.velocity.y > 0.0, "{:?}", plan.velocity);
         assert!((plan.velocity.length() - 10.0).abs() < 1e-4);
     }

@@ -11,7 +11,7 @@ use self::abilities::{AbilityBook, AbilityBookError, AbilityParts};
 use crate::{
     difficulty::Difficulty,
     evolution::MedalLevel,
-    id::{EnemyTypeId, MedalId},
+    id::{EnemyTypeId, MedalCode},
     positive::Positive,
     stage::{Stage, Wave},
 };
@@ -78,10 +78,10 @@ impl EvolutionRules {
 /// `SpecCatalog::new` に渡す組み立て用の値。
 #[derive(Debug, Clone)]
 pub struct SpecParts {
-    pub medals: BTreeMap<MedalId, MedalDef>,
+    pub medals: BTreeMap<MedalCode, MedalDef>,
     pub enemies: HashMap<EnemyTypeId, EnemySpec>,
     /// 錬成レシピ `(A, B, 結果)`。AとBの順序は問わない
-    pub fusions: Vec<(MedalId, MedalId, MedalId)>,
+    pub fusions: Vec<(MedalCode, MedalCode, MedalCode)>,
     pub evolution: EvolutionRules,
     /// 能力・印・反応（基本設計 3.14）
     pub abilities: AbilityParts,
@@ -92,17 +92,17 @@ pub enum SpecError {
     #[error(transparent)]
     Ability(#[from] AbilityBookError),
     #[error("spec for {0} medal is missing")]
-    MissingMedal(MedalId),
+    MissingMedal(MedalCode),
     #[error("a medal cannot be fused with itself ({0})")]
-    SelfFusion(MedalId),
+    SelfFusion(MedalCode),
     #[error("fusion recipe for {0} + {1} is defined twice")]
-    DuplicateRecipe(MedalId, MedalId),
+    DuplicateRecipe(MedalCode, MedalCode),
     #[error("fusion result {0} is used by more than one recipe")]
-    DuplicateResult(MedalId),
+    DuplicateResult(MedalCode),
     #[error("{0} is not an element medal and cannot be a fusion material")]
-    NotAnElement(MedalId),
+    NotAnElement(MedalCode),
     #[error("{0} is not a fusion medal and cannot be a fusion result")]
-    NotAFusion(MedalId),
+    NotAFusion(MedalCode),
     #[error("the normal medal must be in the normal tier")]
     NormalTier,
     #[error("stage refers to unknown enemy type {0}")]
@@ -112,10 +112,10 @@ pub enum SpecError {
 #[derive(Debug, Clone)]
 pub struct SpecCatalog {
     /// ID順（New! の候補を決定的に選ぶため、並びを一定にする）
-    medals: BTreeMap<MedalId, MedalDef>,
+    medals: BTreeMap<MedalCode, MedalDef>,
     enemies: HashMap<EnemyTypeId, EnemySpec>,
     /// 正規化した `(小, 大)` → 結果
-    fusions: BTreeMap<(MedalId, MedalId), MedalId>,
+    fusions: BTreeMap<(MedalCode, MedalCode), MedalCode>,
     evolution: EvolutionRules,
     abilities: AbilityBook,
 }
@@ -123,12 +123,12 @@ pub struct SpecCatalog {
 impl SpecCatalog {
     pub fn new(parts: SpecParts) -> Result<Self, SpecError> {
         let SpecParts { medals, enemies, fusions, evolution, abilities } = parts;
-        match medals.get(&MedalId::normal()).map(|def| def.tier) {
-            None => return Err(SpecError::MissingMedal(MedalId::normal())),
+        match medals.get(&MedalCode::normal()).map(|def| def.tier) {
+            None => return Err(SpecError::MissingMedal(MedalCode::normal())),
             Some(MedalTier::Normal) => {},
             Some(_) => return Err(SpecError::NormalTier),
         }
-        let tier = |m: &MedalId| medals.get(m).map(|def| def.tier);
+        let tier = |m: &MedalCode| medals.get(m).map(|def| def.tier);
         let mut recipes = BTreeMap::new();
         let mut results = HashSet::new();
         for (a, b, result) in fusions {
@@ -169,23 +169,23 @@ impl SpecCatalog {
     }
 
     /// そのレベルでのメダルの物理特性。
-    pub fn medal(&self, medal: &MedalId, level: MedalLevel) -> Option<&MedalSpec> {
+    pub fn medal(&self, medal: &MedalCode, level: MedalLevel) -> Option<&MedalSpec> {
         self.medals
             .get(medal)
             .map(|def| &def.levels[usize::from(level.get() - 1)])
     }
 
-    pub fn tier(&self, medal: &MedalId) -> Option<MedalTier> {
+    pub fn tier(&self, medal: &MedalCode) -> Option<MedalTier> {
         self.medals.get(medal).map(|def| def.tier)
     }
 
     /// 定義済みメダルのID（図鑑・翻訳カタログの整合確認用）。
-    pub fn medals(&self) -> impl Iterator<Item = &MedalId> {
+    pub fn medals(&self) -> impl Iterator<Item = &MedalCode> {
         self.medals.keys()
     }
 
     /// 素材の階層のメダル（ID順）。New! の候補になる。
-    pub fn elements(&self) -> impl Iterator<Item = &MedalId> {
+    pub fn elements(&self) -> impl Iterator<Item = &MedalCode> {
         self.medals
             .iter()
             .filter(|(_, def)| def.tier == MedalTier::Element)
@@ -197,7 +197,7 @@ impl SpecCatalog {
     }
 
     /// A+B の錬成結果（順序は問わない）。
-    pub fn fusion(&self, a: &MedalId, b: &MedalId) -> Option<MedalId> {
+    pub fn fusion(&self, a: &MedalCode, b: &MedalCode) -> Option<MedalCode> {
         self.fusions.get(&pair(a, b)).cloned()
     }
 
@@ -211,7 +211,7 @@ impl SpecCatalog {
     }
 
     /// 定義済みの錬成レシピ（素材ID順）。進化画面の選択肢の生成に使う。
-    pub fn fusions(&self) -> impl Iterator<Item = (&MedalId, &MedalId, &MedalId)> {
+    pub fn fusions(&self) -> impl Iterator<Item = (&MedalCode, &MedalCode, &MedalCode)> {
         self.fusions
             .iter()
             .map(|((a, b), result)| (a, b, result))
@@ -233,7 +233,7 @@ impl SpecCatalog {
 }
 
 /// 錬成レシピのキー（順序を問わないよう小さい方を先にする）。
-fn pair(a: &MedalId, b: &MedalId) -> (MedalId, MedalId) {
+fn pair(a: &MedalCode, b: &MedalCode) -> (MedalCode, MedalCode) {
     if a <= b {
         (a.clone(), b.clone())
     } else {
@@ -278,14 +278,14 @@ pub(crate) mod fixture {
         }
     }
 
-    pub fn fire() -> MedalId {
-        MedalId::new("fire")
+    pub fn fire() -> MedalCode {
+        MedalCode::new("fire")
     }
-    pub fn water() -> MedalId {
-        MedalId::new("water")
+    pub fn water() -> MedalCode {
+        MedalCode::new("water")
     }
-    pub fn sauna() -> MedalId {
-        MedalId::new("sauna")
+    pub fn sauna() -> MedalCode {
+        MedalCode::new("sauna")
     }
 
     /// ノーマル、素材 fire・water、錬成 sauna（fire + water）。ゲージは10で満タン、難易度ごとに
@@ -293,7 +293,7 @@ pub(crate) mod fixture {
     pub fn parts() -> SpecParts {
         SpecParts {
             medals: BTreeMap::from([
-                (MedalId::normal(), def(MedalTier::Normal)),
+                (MedalCode::normal(), def(MedalTier::Normal)),
                 (fire(), def(MedalTier::Element)),
                 (water(), def(MedalTier::Element)),
                 (sauna(), def(MedalTier::Fusion)),
@@ -332,17 +332,17 @@ mod tests {
     fn medal_spec_depends_on_level(catalog: SpecCatalog) {
         assert_eq!(
             catalog
-                .medal(&MedalId::normal(), lv(1))
+                .medal(&MedalCode::normal(), lv(1))
                 .map(|s| s.mass.get()),
             Some(1.0)
         );
         assert_eq!(
             catalog
-                .medal(&MedalId::normal(), lv(4))
+                .medal(&MedalCode::normal(), lv(4))
                 .map(|s| s.mass.get()),
             Some(4.0)
         );
-        assert_eq!(catalog.medal(&MedalId::new("ice"), lv(1)), None);
+        assert_eq!(catalog.medal(&MedalCode::new("ice"), lv(1)), None);
         assert_eq!(catalog.tier(&fire()), Some(MedalTier::Element));
         assert_eq!(catalog.enemy(&EnemyTypeId::new("grunt")), Some(&enemy()));
     }
@@ -353,10 +353,10 @@ mod tests {
         parts
             .abilities
             .medals
-            .insert(MedalId::new("ghost"), abilities::MedalAbilities::default());
+            .insert(MedalCode::new("ghost"), abilities::MedalAbilities::default());
         assert_eq!(
             SpecCatalog::new(parts).err(),
-            Some(SpecError::Ability(AbilityBookError::UnknownMedal(MedalId::new(
+            Some(SpecError::Ability(AbilityBookError::UnknownMedal(MedalCode::new(
                 "ghost"
             ))))
         );
@@ -371,13 +371,13 @@ mod tests {
     fn fusion_ignores_order(catalog: SpecCatalog) {
         assert_eq!(catalog.fusion(&fire(), &water()), Some(sauna()));
         assert_eq!(catalog.fusion(&water(), &fire()), Some(sauna()));
-        assert_eq!(catalog.fusion(&MedalId::normal(), &fire()), None);
+        assert_eq!(catalog.fusion(&MedalCode::normal(), &fire()), None);
     }
 
     #[rstest]
     fn different_recipes_cannot_share_a_result() {
         let mut parts = parts();
-        let sand = MedalId::new("sand");
+        let sand = MedalCode::new("sand");
         parts
             .medals
             .insert(sand.clone(), fixture::def(MedalTier::Element));
@@ -398,8 +398,8 @@ mod tests {
 
     #[rstest]
     #[case::no_normal(
-        |p: &mut SpecParts| { p.medals.remove(&MedalId::normal()); },
-        SpecError::MissingMedal(MedalId::normal())
+        |p: &mut SpecParts| { p.medals.remove(&MedalCode::normal()); },
+        SpecError::MissingMedal(MedalCode::normal())
     )]
     #[case::fusion_result_undefined(
         |p: &mut SpecParts| { p.medals.remove(&sauna()); },
@@ -414,15 +414,15 @@ mod tests {
         SpecError::SelfFusion(fire())
     )]
     #[case::material_not_element(
-        |p: &mut SpecParts| p.fusions.push((MedalId::normal(), fire(), sauna())),
-        SpecError::NotAnElement(MedalId::normal())
+        |p: &mut SpecParts| p.fusions.push((MedalCode::normal(), fire(), sauna())),
+        SpecError::NotAnElement(MedalCode::normal())
     )]
     #[case::result_not_fusion(
-        |p: &mut SpecParts| { p.fusions[0].2 = MedalId::normal(); },
-        SpecError::NotAFusion(MedalId::normal())
+        |p: &mut SpecParts| { p.fusions[0].2 = MedalCode::normal(); },
+        SpecError::NotAFusion(MedalCode::normal())
     )]
     #[case::normal_in_wrong_tier(
-        |p: &mut SpecParts| { p.medals.insert(MedalId::normal(), super::fixture::def(MedalTier::Element)); },
+        |p: &mut SpecParts| { p.medals.insert(MedalCode::normal(), super::fixture::def(MedalTier::Element)); },
         SpecError::NormalTier
     )]
     #[case::duplicate_recipe(
