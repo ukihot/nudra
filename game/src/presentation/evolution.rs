@@ -85,6 +85,7 @@ fn refresh_medals(
     mut commands: Commands,
     medals: Res<MedalModel>,
     bars: Query<Entity, With<MedalBar>>,
+    server: Res<AssetServer>,
 ) {
     if !medals.is_changed() {
         return;
@@ -100,24 +101,59 @@ fn refresh_medals(
                 position_type: PositionType::Absolute,
                 left: px(24),
                 bottom: px(24),
+                max_width: percent(62),
+                border_radius: BorderRadius::all(px(14)),
+                padding: UiRect::all(px(12)),
+                flex_wrap: FlexWrap::Wrap,
+                row_gap: px(8),
                 column_gap: px(8),
                 ..default()
             },
+            BackgroundColor(Color::srgba(0.018, 0.055, 0.08, 0.94)),
+            children![label(Ui::Loadout.text(), 14.0, Color::srgb(0.45, 0.77, 0.75))],
         ))
         .id();
     for medal in &medals.owned {
         let selected = medals.selected.as_ref() == Some(medal);
         let medal = medal.clone();
+        let is_normal = medal == domain::id::MedalCode::normal();
         let button = commands
             .spawn((
                 Hovered::default(),
-                Node { padding: UiRect::all(px(10)), ..default() },
-                BackgroundColor(if selected {
-                    Color::srgb(0.35, 0.4, 0.15)
+                Node {
+                    padding: UiRect::all(px(10)),
+                    align_items: AlignItems::Center,
+                    column_gap: px(8),
+                    border: UiRect::all(px(1)),
+                    border_radius: BorderRadius::all(px(10)),
+                    ..default()
+                },
+                BorderColor::all(if selected {
+                    Color::srgb(0.8, 0.64, 0.3)
                 } else {
-                    Color::srgb(0.12, 0.15, 0.1)
+                    Color::srgb(0.1, 0.24, 0.26)
                 }),
-                children![label(keys::medal_name(&medal), 20.0, Color::WHITE)],
+                BackgroundColor(if selected {
+                    Color::srgb(0.16, 0.24, 0.24)
+                } else {
+                    Color::srgb(0.025, 0.09, 0.12)
+                }),
+                children![
+                    (
+                        ImageNode::new(server.load(keys::MEDAL_ICON)),
+                        Node {
+                            width: px(32),
+                            height: px(32),
+                            display: if is_normal {
+                                Display::Flex
+                            } else {
+                                Display::None
+                            },
+                            ..default()
+                        }
+                    ),
+                    label(keys::medal_name(&medal), 20.0, Color::WHITE)
+                ],
             ))
             .observe(move |_: On<PointerClick>, mut submit: MessageWriter<SubmitRequest>| {
                 submit.write(SubmitRequest(Request::SelectMedal(medal.clone())));

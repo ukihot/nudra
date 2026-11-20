@@ -2,8 +2,8 @@
   "title": "NUDRA",
   "choose_pusher": "Pusherを選んでください",
   "character_entry": "{{index}}  {{name}}",
-  "hud": "WAVE {{wave}}/4\n敵 {{enemies}}\n撃破 {{defeated}}\nLV {{level}}\n進化 {{gauge}}%",
-  "controls": "A/D・←/→: 照準\nSpace・クリック・タップの長押し: 発射\nF: オート連射切替 · Tab: メダル切替",
+  "hud": "侵入中   {{enemies}}\n撃破数   {{defeated}}",
+  "controls": "A / D  照準\nSPACE  長押しで発射\nF  オート連射\nTAB  メダル切替",
   "game_over": "ゲームオーバー",
   "defeated": "撃破数 {{defeated}}",
   "best_record": "最高記録 {{best}}",
@@ -28,5 +28,13 @@
   "start": "はじめる",
   "language": "言語",
   "back": "タイトルへ戻る",
-  "difficulty_level": "難易度 {{level}}"
+  "difficulty_level": "難易度 {{level}}",
+  "expedition": "深海の防衛線",
+  "hud_wave": "WAVE  {{wave}} / 4",
+  "hud_growth": "進化  LV {{level}}   ·   {{gauge}}%",
+  "loadout": "射出メダル",
+  "render_quality": "映像品質",
+  "quality_mobile": "Mobile · 軽量",
+  "quality_standard": "Standard · 標準",
+  "quality_high": "High · 接触影とSSAO"
 }

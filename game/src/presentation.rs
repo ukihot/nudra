@@ -9,6 +9,7 @@ mod input;
 pub mod keys;
 pub mod outgame;
 pub mod play_time;
+mod render_profile;
 mod select;
 mod visuals;
 

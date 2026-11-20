@@ -9,7 +9,7 @@ use domain::{
     difficulty::Difficulty,
     evolution::Evolution,
     id::{MedalCode, PusherCharacterId, StageId},
-    progress::Language,
+    progress::{Language, RenderQuality},
 };
 
 // ── 入力: 意図 ────────────────────────────────────────────
@@ -32,6 +32,7 @@ pub struct ControlIntent {
 pub enum Request {
     Navigate(OutgameScreen),
     SetLanguage(Language),
+    SetRenderQuality(RenderQuality),
     /// キャラクターを選んでインゲームを開始する
     Start {
         character: PusherCharacterId,

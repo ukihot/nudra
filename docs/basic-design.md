@@ -1453,7 +1453,7 @@ Blender 5.3 をステージエディタとして使う。Empty `root_game` の�
 
 ---
 
-## 5.10 レンダリングと映像品質プリセット（Render Profile）【仮決定・未実装】
+## 5.10 レンダリングと映像品質プリセット（Render Profile）【実装済み・実機計測は継続】
 
 NUDRAの商業品質は、数千枚の金属メダルが**一枚ずつ美しく読み取れる**ことで決まる。iOSも対象のため、機能を全部ONにはしない。
 LookDevの値はRustのソースに散らさず、**`RenderProfile`（Presentationの読み取り専用Resource）1つに集める**。
@@ -1494,7 +1494,22 @@ Environment Map → Camera → Shadow → Tonemapping → Anti-aliasing → Bloo
   保存形式の変更になるため、版3を追加して版2から移行する（5.7。版1・版2のゴールデンテストは消さない）。
 - 表示名はi18nカタログに置く（5.9）。開発時だけ、少数の値（FOV・環境光の強さ・主光源の色・Bloom）をキー操作で変える
   デバッグ用の小さな操作を用意する。汎用のマテリアルエディタは作らない。
-- 【未実装】`RenderProfile`、プリセットの定義ファイル、オプションとセーブの版3、環境マップのアセット。
+- 2026-11-20 実装: `presentation/render_profile.rs` の `RenderProfile`、`assets/render.profiles.ron`、オプションの品質選択、セーブ版3を接続。
+  版1・2は既定の品質（PCはStandard、iOSはMobile）へ移行し、言語・クリア記録を保持する。版1のゴールデンファイルと版2の固定ペイロードを検証する。
+- 環境マップは専用のスタジオ照明を自作し、`lighting/studio_{diffuse,specular}.ktx2`（linear RGBA16F）へ同梱。
+  diffuseはcosine積分、specularはGGXの粗さ別7mip。背景には使わない。RONで両パスを `None` にすると半球グラデーションで比較できる。
+- 初期構図は位置(10,31,17)、注視点(0,0,-2.3)、俯角約55°・縦FOV33°。主光源8,000lux、AgX、ColorGradingは露出-0.5・彩度1。
+  カメラは固定で、黒背景を深い紺へ変更し、距離45〜80mの霧で盤面下の岩を沈める。
+- Mobile: 影1024px/1カスケード、MSAA4x、Bloomなし。Standard: 影2048px/2カスケード、MSAA4x、弱いBloom。
+  High: 影4096px/2カスケード、MSAAなし＋SMAA、Depth/Normal Prepass、接触影0.15m、SSAO半径0.24m。
+  軽量プリセットへ戻す際はBloom・接触影・SSAO・AA・各Prepassも明示的に除去する。
+  HUDは後処理を掛けない別の2Dカメラで最後に重ね、映像品質によらず文字とアイコンの色を保つ。
+- 設定は開発時だけ0.5秒間隔でファイル更新時刻を監視し、`AssetServer::reload` で再読込する。構文が不正、非有限値、不正な影解像度、SSAOとMSAAの同時指定などは適用せず、最後の有効な設定を維持する。
+  初回読込前も同梱の既定値で描画する。配布ビルドでは監視を停止する。標準 `file_watcher` はこの環境で依存する `notify-debouncer-full 0.7` を解決できないため使用しない。
+- 開発ビルド専用: F6=FOV、F7=環境光、F8=主光源の暖色/寒色、F9=Bloom、F10=Experimental、F11=トーンマッピング比較、F12=比較値リセット。
+  ExperimentalはTAA＋KhronosPbrNeutralの比較用。Solariは有効にせず、オプション・保存対象にも含めない。
+- `cargo run -p game --example art_review -- mobile`（`standard` / `high` も可）で、別の保存先を使い同じTick付近の画像を `art/reviews/` へ出力する。
+  iOS実機、数千枚の性能、SSAOのノイズと最終的な露出は継続検証。Auto Exposure・DoF・Reflection Probe・Volumetric Fogは通常プレイでは有効にしない。
 
 # 6. スケジュール設計
 
@@ -2137,7 +2152,7 @@ Domainのユニットテストだけ、6種それぞれの単独テストだけ�
 | 39 | `OtherFell` の大量発火（仮決定） | 購読索引と遅延列挙。条件判定前の検査を4,096件/tickで打ち切る（3.18、6.2） | 500落下×3,000購読能力、全封印時を含む実検査数・保持数の検証 |
 | 40 | 着地の支持条件（仮決定） | 接触法線・接触点・相対分離速度から接地を判定。壁の接触開始とは区別（5.4） | 床・壁・天井・傾斜・投機的接触・継続支持を実Avianで検証し、しきい値を調整 |
 | 41 | 進化時の既存個体（仮決定） | 既存の回数・期限を保持し、新規覚醒だけ初期化。素材個体の高Lvを維持（3.16、4.4） | Lv.3→4、期限到来時、処理済みFuse、再反映、錬成・再取得、3,000個体の覚醒テスト |
-| 42 | 映像品質のプリセット（仮決定） | Mobile／Standard／High／Experimental。環境マップ最優先、AgX、MSAA 4x基準、SSAOはMsaa::Off必須のため上位のみ（5.10） | iOS実機とPCで同じ盤面のスクリーンショット・負荷を比較して確定。HDRIアセットの用意 |
+| 42 | 映像品質のプリセット（実装済み・値は要計測） | Mobile／Standard／High、開発用Experimental。専用HDR環境マップ、AgX、MSAA4x、HighはSMAA＋接触影＋SSAO。オプション・セーブ版3へ接続（5.10） | iOS実機と数千枚の負荷を比較し、影・SSAO・露出の値を確定 |
 
 ---
 

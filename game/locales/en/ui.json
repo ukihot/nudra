@@ -2,8 +2,8 @@
   "title": "NUDRA",
   "choose_pusher": "Choose your Pusher",
   "character_entry": "{{index}}  {{name}}",
-  "hud": "WAVE {{wave}}/4\nENEMIES {{enemies}}\nDEFEATED {{defeated}}\nLV {{level}}\nEVOLUTION {{gauge}}%",
-  "controls": "A/D or ←/→: aim\nHold Space / click / tap: launch\nF: auto fire on/off · Tab: medal",
+  "hud": "INVADERS   {{enemies}}\nDEFEATED   {{defeated}}",
+  "controls": "A / D  Aim\nSPACE  Hold to fire\nF  Auto fire\nTAB  Change medal",
   "game_over": "GAME OVER",
   "defeated": "Defeated {{defeated}}",
   "best_record": "Best {{best}}",
@@ -28,5 +28,13 @@
   "start": "Start",
   "language": "Language",
   "back": "Back to title",
-  "difficulty_level": "Difficulty {{level}}"
+  "difficulty_level": "Difficulty {{level}}",
+  "expedition": "THE ABYSSAL SANCTUARY",
+  "hud_wave": "WAVE  {{wave}} / 4",
+  "hud_growth": "EVOLVE  LV {{level}}   ·   {{gauge}}%",
+  "loadout": "LOADOUT",
+  "render_quality": "Visual quality",
+  "quality_mobile": "Mobile · Lightweight",
+  "quality_standard": "Standard · Balanced",
+  "quality_high": "High · Contact shadows + SSAO"
 }

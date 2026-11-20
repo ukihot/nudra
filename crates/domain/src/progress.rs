@@ -15,6 +15,24 @@ pub enum Language {
     English,
 }
 
+/// 保存する映像品質の選択。描画機能やエンジン固有の値は外側で解決する。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenderQuality {
+    Mobile,
+    Standard,
+    High,
+}
+
+impl Default for RenderQuality {
+    fn default() -> Self {
+        if cfg!(target_os = "ios") {
+            Self::Mobile
+        } else {
+            Self::Standard
+        }
+    }
+}
+
 /// ステージごとの記録。`plays >= 1` の記録しか存在しない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StageRecord {
@@ -63,6 +81,7 @@ pub struct PlayerProgress {
     records: BTreeMap<StageId, StageRecord>,
     cleared: BTreeMap<StageId, Difficulty>,
     language: Language,
+    render_quality: RenderQuality,
 }
 
 impl PlayerProgress {
@@ -92,6 +111,7 @@ impl PlayerProgress {
             records: map,
             cleared: BTreeMap::new(),
             language: Language::default(),
+            render_quality: RenderQuality::default(),
         })
     }
 
@@ -158,6 +178,14 @@ impl PlayerProgress {
         self.language = language;
     }
 
+    pub fn render_quality(&self) -> RenderQuality {
+        self.render_quality
+    }
+
+    pub fn set_render_quality(&mut self, quality: RenderQuality) {
+        self.render_quality = quality;
+    }
+
     pub fn clears(&self) -> impl Iterator<Item = (&StageId, Difficulty)> {
         self.cleared.iter().map(|(id, d)| (id, *d))
     }
@@ -209,6 +237,18 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
+
+    #[rstest]
+    #[case(RenderQuality::Mobile)]
+    #[case(RenderQuality::Standard)]
+    #[case(RenderQuality::High)]
+    fn render_quality_is_a_persistent_preference(#[case] quality: RenderQuality) {
+        let mut progress = PlayerProgress::default();
+        assert_eq!(progress.render_quality(), RenderQuality::default());
+        progress.set_render_quality(quality);
+        assert_eq!(progress.render_quality(), quality);
+        assert_eq!(progress.games_played(), 0);
+    }
 
     fn stage(id: &str) -> StageId {
         StageId::new(id)

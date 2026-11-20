@@ -32,7 +32,7 @@ use game::{
     state::{AppState, GamePhase},
 };
 
-/// stage_01 の初期メダル数（12列 × 7行 × 3段）
+/// stage_01 の初期メダル数（不規則な俵積みを個別の位置として定義）
 const INITIAL_MEDALS: usize = 12 * 7 * 3;
 /// stage_01 のカタパルトのクールダウン 250ms を 60Hz で切り上げたTick数
 const COOLDOWN_TICKS: u64 = 15;
@@ -292,6 +292,49 @@ fn options_language_is_saved_and_restored_on_restart() {
     submit(&mut app, Request::Navigate(OutgameScreen::Title));
     run_until(&mut app, 10, |a| app_state(a) == AppState::Title);
     assert_eq!(count::<Medal>(&mut app), 0);
+}
+
+#[test]
+fn render_quality_is_rejected_outside_options_and_survives_restart() {
+    use domain::progress::RenderQuality;
+    use game::port::{OptionsModel, OutgameScreen};
+    let dir = tempfile::tempdir().expect("dir");
+    let mut app = app_with_save_dir(tempfile::tempdir().expect("dir"));
+    run_until(&mut app, 3000, |a| app_state(a) == AppState::Title);
+    submit(&mut app, Request::SetRenderQuality(RenderQuality::High));
+    app.update();
+    assert_eq!(
+        app.world().resource::<OptionsModel>().render_quality,
+        RenderQuality::Standard
+    );
+    assert!(
+        app.world()
+            .resource::<Recorded>()
+            .outcomes
+            .iter()
+            .any(|o| o.request == Request::SetRenderQuality(RenderQuality::High)
+                && o.status == RequestStatus::Rejected(RejectReason::WrongState))
+    );
+    submit(&mut app, Request::Navigate(OutgameScreen::Options));
+    run_until(&mut app, 10, |a| app_state(a) == AppState::Options);
+    submit(&mut app, Request::SetRenderQuality(RenderQuality::High));
+    run_until(&mut app, 200, |a| {
+        save_settled(a) && saved(a).render_quality() == RenderQuality::High
+    });
+    std::fs::copy(
+        app.world().resource::<FileProgressRepository>().path(),
+        dir.path().join("progress.sav"),
+    )
+    .expect("copy save");
+    let mut restarted = app_with_save_dir(dir);
+    run_until(&mut restarted, 3000, |a| app_state(a) == AppState::Title);
+    assert_eq!(
+        restarted
+            .world()
+            .resource::<OptionsModel>()
+            .render_quality,
+        RenderQuality::High
+    );
 }
 
 #[test]
@@ -993,6 +1036,48 @@ mod abilities {
     };
 
     use super::*;
+
+    /// 能力の回数・報酬は、演出用の初期配置の崩れ方に依存しない固定盤面で検証する。
+    /// 実ステージの不規則な山は、開始テストとランダムプレイのsoakで使う。
+    fn started() -> App {
+        use domain::stage::{InitialMedalPlacement, Stage, StageParts};
+        use game::infrastructure::data::StageCatalog;
+        let mut app = loaded();
+        let id = domain::id::StageId::new("stage_01");
+        {
+            let mut catalog = app.world_mut().resource_mut::<StageCatalog>();
+            let stage = catalog.0.get(&id).expect("stage");
+            let fixture = Stage::new(StageParts {
+                id: id.clone(),
+                geometry: stage.geometry().clone(),
+                catapult: stage.catapult().clone(),
+                bridges: stage.bridges().to_vec(),
+                abysses: stage.abysses().to_vec(),
+                rails: stage.rails().to_vec(),
+                goals: stage.goals().to_vec(),
+                wave_plan: stage.wave_plan().clone(),
+                initial_medals: vec![InitialMedalPlacement::grid(
+                    Vec3::new(0.0, 0.05, -4.2),
+                    12,
+                    7,
+                    3,
+                    Vec3::new(0.6, 0.1, 0.6),
+                )],
+            })
+            .expect("valid ability fixture");
+            catalog.0.insert(id.clone(), fixture);
+        }
+        submit(
+            &mut app,
+            Request::Start {
+                character: PusherCharacterId::new("mop_rabbit"),
+                stage: id,
+                difficulty: domain::difficulty::Difficulty::EASY,
+            },
+        );
+        run_until(&mut app, 10, |a| phase(a) == Some(GamePhase::Running));
+        app
+    }
 
     fn spawn(app: &mut App, code: &str, level: u8, at: Vec3) -> Entity {
         let code = MedalCode::new(code);

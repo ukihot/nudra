@@ -65,6 +65,17 @@ fn release_intent(mut intent: ResMut<ControlIntent>) {
 fn draw_aim_guide(aim: Res<AimModel>, mut gizmos: Gizmos) {
     if aim.direction != Vec3::ZERO {
         let tip = aim.origin + aim.direction * AIM_GUIDE_LENGTH;
-        gizmos.arrow(aim.origin, tip, Color::srgb(1.0, 0.85, 0.3));
+        let color = Color::srgb(0.35, 0.95, 0.85);
+        // 操作の方向を点列で示す。着地点の物理予測ではなく、床上の照準目印。
+        for i in 1..=12 {
+            let t = i as f32 / 12.0;
+            let p = aim.origin.lerp(tip, t);
+            gizmos.sphere(Isometry3d::from_translation(p), 0.025, color);
+        }
+        let target = Vec3::new(tip.x, 0.03, tip.z);
+        let orientation = Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2);
+        for radius in [0.22, 0.29] {
+            gizmos.circle(Isometry3d::new(target, orientation), radius, color);
+        }
     }
 }

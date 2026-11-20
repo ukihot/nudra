@@ -26,13 +26,13 @@ use bevy::{log::warn, prelude::Resource};
 use domain::{
     difficulty::Difficulty,
     id::{PusherCharacterId, StageId},
-    progress::{Language, PlayerProgress, ProgressError},
+    progress::{Language, PlayerProgress, ProgressError, RenderQuality},
     repository::ProgressRepository,
 };
 use serde::{Deserialize, Serialize};
 
 const MAGIC: [u8; 8] = *b"NUDRASAV";
-pub const CURRENT_VERSION: u16 = 2;
+pub const CURRENT_VERSION: u16 = 3;
 const HEADER_LEN: usize = MAGIC.len() + 2 + 4 + 4;
 /// 本体の上限。壊れた長さで巨大な確保をしないため。
 const MAX_PAYLOAD: usize = 1 << 20;
@@ -59,6 +59,32 @@ struct SaveV2 {
     progress: SaveV1,
     language: SavedLanguage,
     clears: Vec<(String, u8)>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct SaveV3 {
+    previous: SaveV2,
+    render_quality: SavedRenderQuality,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+enum SavedRenderQuality {
+    Mobile,
+    Standard,
+    High,
+}
+
+impl From<&PlayerProgress> for SaveV3 {
+    fn from(progress: &PlayerProgress) -> Self {
+        Self {
+            previous: SaveV2::from(progress),
+            render_quality: match progress.render_quality() {
+                RenderQuality::Mobile => SavedRenderQuality::Mobile,
+                RenderQuality::Standard => SavedRenderQuality::Standard,
+                RenderQuality::High => SavedRenderQuality::High,
+            },
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -178,7 +204,7 @@ impl SaveFileError {
 // ── 符号化 ────────────────────────────────────────────────
 
 pub fn encode(progress: &PlayerProgress) -> Result<Vec<u8>, SaveFileError> {
-    let payload = postcard::to_stdvec(&SaveV2::from(progress)).map_err(SaveFileError::Encode)?;
+    let payload = postcard::to_stdvec(&SaveV3::from(progress)).map_err(SaveFileError::Encode)?;
     let length = u32::try_from(payload.len())
         .ok()
         .filter(|_| payload.len() <= MAX_PAYLOAD)
@@ -223,8 +249,21 @@ pub fn decode(bytes: &[u8]) -> Result<PlayerProgress, SaveFileError> {
             .map_err(SaveFileError::Decode)?
             .into_domain()
             .map_err(SaveFileError::Invalid),
-        2 => {
-            let save: SaveV2 = postcard::from_bytes(payload).map_err(SaveFileError::Decode)?;
+        2 | 3 => {
+            let (save, quality) = if version == 2 {
+                (
+                    postcard::from_bytes::<SaveV2>(payload).map_err(SaveFileError::Decode)?,
+                    RenderQuality::default(),
+                )
+            } else {
+                let save: SaveV3 = postcard::from_bytes(payload).map_err(SaveFileError::Decode)?;
+                let quality = match save.render_quality {
+                    SavedRenderQuality::Mobile => RenderQuality::Mobile,
+                    SavedRenderQuality::Standard => RenderQuality::Standard,
+                    SavedRenderQuality::High => RenderQuality::High,
+                };
+                (save.previous, quality)
+            };
             let language = match save.language {
                 SavedLanguage::Japanese => Language::Japanese,
                 SavedLanguage::English => Language::English,
@@ -239,11 +278,14 @@ pub fn decode(bytes: &[u8]) -> Result<PlayerProgress, SaveFileError> {
                     ))
                 })
                 .collect::<Result<Vec<_>, SaveFileError>>()?;
-            save.progress
+            let mut progress = save
+                .progress
                 .into_domain()
                 .map_err(SaveFileError::Invalid)?
                 .restore_preferences(language, clears)
-                .map_err(SaveFileError::Invalid)
+                .map_err(SaveFileError::Invalid)?;
+            progress.set_render_quality(quality);
+            Ok(progress)
         },
         other => Err(SaveFileError::UnsupportedVersion(other)),
     }
@@ -409,7 +451,7 @@ mod tests {
         original
             .record_session_result(&StageId::new("stage_01"), 8, Difficulty::EASY, true)
             .expect("won");
-        let bytes = encode(&original).expect("encode");
+        let bytes = frame(2, &postcard::to_stdvec(&SaveV2::from(&original)).expect("encode"));
         assert_eq!(&bytes[8..10], &2u16.to_le_bytes());
         let restored = decode(&bytes).expect("decode");
         assert_eq!(restored, original);
@@ -430,6 +472,38 @@ mod tests {
         };
         let bytes = frame(2, &postcard::to_stdvec(&save).expect("encode"));
         assert!(matches!(decode(&bytes), Err(SaveFileError::InvalidDifficulty(_))));
+    }
+
+    #[rstest]
+    #[case(RenderQuality::Mobile)]
+    #[case(RenderQuality::Standard)]
+    #[case(RenderQuality::High)]
+    fn version_3_round_trips_quality_and_existing_progress(#[case] quality: RenderQuality) {
+        let mut original = progress(&[("stage_01", 9)]);
+        original.set_language(Language::English);
+        original.set_render_quality(quality);
+        let bytes = encode(&original).expect("encode");
+        assert_eq!(&bytes[8..10], &3u16.to_le_bytes());
+        assert_eq!(decode(&bytes).expect("decode"), original);
+    }
+
+    #[test]
+    fn version_2_golden_payload_migrates_to_default_quality() {
+        // Frozen postcard layout: no character, no games, no records, English, no clears.
+        const GOLDEN_V2_PAYLOAD: &[u8] = &[0, 0, 0, 1, 0];
+        let restored = decode(&frame(2, GOLDEN_V2_PAYLOAD)).expect("golden v2");
+        assert_eq!(restored.language(), Language::English);
+        assert_eq!(restored.render_quality(), RenderQuality::default());
+        let migrated = encode(&restored).expect("migrate to v3");
+        assert_eq!(decode(&migrated).expect("decode v3"), restored);
+    }
+
+    #[test]
+    fn version_3_rejects_an_unknown_quality() {
+        assert!(matches!(
+            decode(&frame(3, &[0, 0, 0, 0, 0, 3])),
+            Err(SaveFileError::Decode(_))
+        ));
     }
 
     /// 版1のファイル形式を固定する。この値が変わるなら、版2を追加して移行すること。
@@ -456,7 +530,7 @@ mod tests {
     #[rstest]
     #[case::empty(vec![], "Truncated")]
     #[case::bad_magic(frame(1, b"x").into_iter().enumerate().map(|(i, b)| if i == 0 { b'X' } else { b }).collect(), "BadMagic")]
-    #[case::newer_version(frame(3, b"anything"), "NewerVersion")]
+    #[case::newer_version(frame(CURRENT_VERSION + 1, b"anything"), "NewerVersion")]
     #[case::unknown_old_version(frame(0, b"anything"), "UnsupportedVersion")]
     #[case::too_large({ let mut f = frame(1, b""); f[10..14].copy_from_slice(&u32::MAX.to_le_bytes()); f }, "TooLarge")]
     #[case::payload_cut(frame(1, b"abcdef")[..HEADER_LEN + 3].to_vec(), "LengthMismatch")]

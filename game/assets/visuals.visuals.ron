@@ -5,22 +5,22 @@
 (
     default: Placeholder(color: (0.6, 0.6, 0.6)),
     entries: {
-        "stage/floor": Placeholder(color: (0.24, 0.27, 0.16)),
-        "stage/bridge": Placeholder(color: (0.33, 0.27, 0.18)),
-        "stage/spawn": Placeholder(color: (0.18, 0.14, 0.12)),
-        "stage/goal": Placeholder(color: (0.75, 0.2, 0.15)),
+        "stage/floor": Model(scene: "models/stages/deck_refined.glb#Scene0"),
+        "stage/bridge": Model(scene: "models/stages/bridge_refined.glb#Scene0"),
+        "stage/spawn": Model(scene: "models/stages/spawn_refined.glb#Scene0"),
+        "stage/goal": Model(scene: "models/stages/goal_sanctuary.glb#Scene0"),
         // カタパルト: 原点は旋回軸＝射出口。台座は固定、シュートは旋回する
         "catapult/base": Model(scene: "models/catapult/catapult_base.glb#Scene0"),
         "catapult/chute": Model(scene: "models/catapult/catapult_chute.glb#Scene0"),
-        "medal/normal": Placeholder(color: (0.95, 0.78, 0.25)),
+        "medal/normal": Model(scene: "models/medals/medal_normal.glb#Scene0"),
         "medal/fire": Placeholder(color: (0.95, 0.3, 0.12)),
         "medal/water": Placeholder(color: (0.2, 0.5, 0.9)),
         "medal/sauna": Placeholder(color: (0.85, 0.55, 0.7)),
         // 場（能力の Zone）。key は "zone/{印}"
         "zone/hot": Placeholder(color: (1.0, 0.45, 0.1)),
-        "enemy/grunt": Placeholder(color: (0.62, 0.7, 0.38)),
-        "enemy/brute": Placeholder(color: (0.45, 0.32, 0.5)),
-        "enemy/boss": Placeholder(color: (0.7, 0.15, 0.3)),
+        "enemy/grunt": Model(scene: "models/enemies/grunt.glb#Scene0"),
+        "enemy/brute": Model(scene: "models/enemies/brute.glb#Scene0"),
+        "enemy/boss": Model(scene: "models/enemies/boss.glb#Scene0"),
         "pusher/mop_rabbit": Placeholder(color: (0.92, 0.9, 0.95)),
         "pusher/iron_bear": Placeholder(color: (0.5, 0.38, 0.28)),
         // 原点はコライダーの中心（底は -0.42）。頭は手前（+Z）を向く

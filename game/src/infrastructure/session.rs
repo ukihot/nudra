@@ -241,7 +241,7 @@ fn close_requests(
             app_state,
             AppState::Title | AppState::CharacterSelect | AppState::Options | AppState::Credits
         ),
-        RequestKind::SetLanguage => app_state == AppState::Options,
+        RequestKind::SetLanguage | RequestKind::SetRenderQuality => app_state == AppState::Options,
         RequestKind::Start => app_state == AppState::CharacterSelect,
         RequestKind::Menu => app_state == AppState::Result,
         RequestKind::Evolve => phase == Some(GamePhase::Evolving),

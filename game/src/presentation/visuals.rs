@@ -104,6 +104,7 @@ fn attach_visual(
         })
         .unwrap_or(FALLBACK);
 
+    commands.entity(entity).insert(Visibility::default());
     match look {
         Look::Placeholder { color: (r, g, b) } => {
             let mesh = cache
@@ -159,7 +160,7 @@ fn attach_visual(
         Look::Model { scene } => {
             commands
                 .entity(entity)
-                .with_child(WorldAssetRoot(server.load(scene)));
+                .with_child((WorldAssetRoot(server.load(scene)), Visibility::default()));
         },
     }
 }

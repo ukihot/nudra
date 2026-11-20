@@ -5,7 +5,7 @@ use bevy::{
     prelude::*,
 };
 use bevy_intl::I18n;
-use domain::progress::Language;
+use domain::progress::{Language, RenderQuality};
 
 use super::{
     keys::{self, Ui},
@@ -53,12 +53,19 @@ pub(super) fn button(caption: impl Bundle, selected: bool) -> impl Bundle {
             min_width: px(200),
             padding: UiRect::all(px(12)),
             justify_content: JustifyContent::Center,
+            border: UiRect::all(px(1)),
+            border_radius: BorderRadius::all(px(10)),
             ..default()
         },
         BackgroundColor(if selected {
-            Color::srgb(0.32, 0.38, 0.15)
+            Color::srgb(0.12, 0.25, 0.27)
         } else {
-            Color::srgb(0.14, 0.19, 0.14)
+            Color::srgb(0.025, 0.09, 0.12)
+        }),
+        BorderColor::all(if selected {
+            Color::srgb(0.7, 0.52, 0.24)
+        } else {
+            Color::srgb(0.1, 0.23, 0.26)
         }),
         children![caption],
     )
@@ -130,6 +137,26 @@ fn render_options(
             ))
             .observe(move |_: On<PointerClick>, mut submit: MessageWriter<SubmitRequest>| {
                 submit.write(SubmitRequest(Request::SetLanguage(language)));
+            })
+            .id();
+        commands.entity(root).add_child(item);
+    }
+    let heading = commands
+        .spawn(label(Ui::RenderQuality.text(), 24.0, Color::WHITE))
+        .id();
+    commands.entity(root).add_child(heading);
+    for (caption, quality) in [
+        (Ui::QualityMobile, RenderQuality::Mobile),
+        (Ui::QualityStandard, RenderQuality::Standard),
+        (Ui::QualityHigh, RenderQuality::High),
+    ] {
+        let item = commands
+            .spawn(button(
+                label(caption.text(), 21.0, Color::WHITE),
+                model.render_quality == quality,
+            ))
+            .observe(move |_: On<PointerClick>, mut submit: MessageWriter<SubmitRequest>| {
+                submit.write(SubmitRequest(Request::SetRenderQuality(quality)));
             })
             .id();
         commands.entity(root).add_child(item);

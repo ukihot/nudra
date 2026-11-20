@@ -17,8 +17,16 @@ use crate::{
 };
 
 pub(super) fn plugin(app: &mut App) {
-    app.add_systems(Update, (navigate, set_language).after(register_requests))
-        .add_systems(Update, publish_models);
+    app.add_systems(
+        Update,
+        (navigate, set_language, set_render_quality).after(register_requests),
+    )
+    .add_systems(
+        Update,
+        publish_models
+            .after(set_language)
+            .after(set_render_quality),
+    );
 }
 
 fn navigate(
@@ -81,7 +89,10 @@ fn publish_models(
     mut roster: ResMut<StageRoster>,
     mut options: ResMut<OptionsModel>,
 ) {
-    options.set_if_neq(OptionsModel { language: progress.language() });
+    options.set_if_neq(OptionsModel {
+        language: progress.language(),
+        render_quality: progress.render_quality(),
+    });
     if let Some(stages) = stages
         && (stages.is_changed() || progress.is_changed())
     {
@@ -95,5 +106,27 @@ fn publish_models(
             .collect();
         entries.sort_by(|a, b| a.id.cmp(&b.id));
         roster.set_if_neq(StageRoster(entries));
+    }
+}
+
+fn set_render_quality(
+    mut ledger: ResMut<RequestLedger>,
+    state: Res<State<AppState>>,
+    mut progress: ResMut<Progress>,
+    mut save: ResMut<SaveJob>,
+    mut outcomes: MessageWriter<RequestOutcome>,
+) {
+    for (id, request) in ledger.take_all(RequestKind::SetRenderQuality) {
+        let Request::SetRenderQuality(quality) = &request else {
+            continue;
+        };
+        let status = if *state.get() == AppState::Options {
+            progress.set_render_quality(*quality);
+            save.request(&progress);
+            RequestStatus::Completed
+        } else {
+            RequestStatus::Rejected(RejectReason::WrongState)
+        };
+        report([outcome(id, request, status)], &mut outcomes);
     }
 }

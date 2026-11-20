@@ -17,6 +17,15 @@ const UI_FILE: &str = "ui";
 
 pub const VISUAL_MANIFEST: &str = "visuals.visuals.ron";
 pub const VISUAL_MANIFEST_EXTENSIONS: &[&str] = &["visuals.ron"];
+pub const RENDER_PROFILE: &str = "render.profiles.ron";
+pub const RENDER_PROFILE_SOURCE: &str =
+    concat!(env!("CARGO_MANIFEST_DIR"), "/assets/render.profiles.ron");
+pub const RENDER_PROFILE_EXTENSIONS: &[&str] = &["profiles.ron"];
+pub const MEDAL_ICON: &str = "ui/medal_normal.png";
+pub const PUSHER_PORTRAIT: &str = "ui/ao_umiushi.png";
+pub const BUNDLED_RENDER_PROFILE: &str = include_str!("../../assets/render.profiles.ron");
+pub const VALID_RENDER_PROFILE: &str = "bundled render profiles are valid";
+pub const INVALID_RENDER_PROFILE: &str = "invalid render profiles; keeping the last valid look";
 
 /// UIの表示文のキー。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,10 +60,18 @@ pub enum Ui {
     LockedDifficulty,
     Start,
     PreparationControls,
+    Expedition,
+    HudWave,
+    HudGrowth,
+    Loadout,
+    RenderQuality,
+    QualityMobile,
+    QualityStandard,
+    QualityHigh,
 }
 
 impl Ui {
-    pub const ALL: [Self; 30] = [
+    pub const ALL: [Self; 38] = [
         Self::Title,
         Self::ChoosePusher,
         Self::CharacterEntry,
@@ -85,6 +102,14 @@ impl Ui {
         Self::LockedDifficulty,
         Self::Start,
         Self::PreparationControls,
+        Self::Expedition,
+        Self::HudWave,
+        Self::HudGrowth,
+        Self::Loadout,
+        Self::RenderQuality,
+        Self::QualityMobile,
+        Self::QualityStandard,
+        Self::QualityHigh,
     ];
 
     pub const fn key(self) -> &'static str {
@@ -119,6 +144,14 @@ impl Ui {
             Self::LockedDifficulty => "locked_difficulty",
             Self::Start => "start",
             Self::PreparationControls => "preparation_controls",
+            Self::Expedition => "expedition",
+            Self::HudWave => "hud_wave",
+            Self::HudGrowth => "hud_growth",
+            Self::Loadout => "loadout",
+            Self::RenderQuality => "render_quality",
+            Self::QualityMobile => "quality_mobile",
+            Self::QualityStandard => "quality_standard",
+            Self::QualityHigh => "quality_high",
         }
     }
 

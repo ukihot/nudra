@@ -6,7 +6,7 @@ use bevy_intl::I18nText;
 use domain::event::DomainEvent;
 
 use super::{
-    keys::{Arg, Ui},
+    keys::{self, Arg, Ui},
     play_time::PlayTime,
     select::label,
 };
@@ -23,6 +23,18 @@ struct Score {
 
 #[derive(Component)]
 struct HudText;
+
+#[derive(Component)]
+struct WaveText;
+
+#[derive(Component)]
+struct GrowthText;
+
+#[derive(Component)]
+struct GaugeFill;
+
+type WaveLabel = (With<WaveText>, Without<HudText>, Without<GrowthText>);
+type GrowthLabel = (With<GrowthText>, Without<HudText>, Without<WaveText>);
 
 pub(super) fn plugin(app: &mut App) {
     app.init_resource::<Score>()
@@ -53,29 +65,105 @@ fn hud_text(hud: &HudModel, score: &Score) -> I18nText {
     ])
 }
 
-fn spawn_hud(mut commands: Commands, hud: Res<HudModel>, score: Res<Score>) {
+fn spawn_hud(
+    mut commands: Commands,
+    hud: Res<HudModel>,
+    score: Res<Score>,
+    server: Res<AssetServer>,
+) {
     commands.spawn((
         DespawnOnExit(AppState::InGame),
         Node {
             position_type: PositionType::Absolute,
             left: px(24),
-            top: px(20),
+            top: px(24),
+            width: px(224),
+            padding: UiRect::all(px(20)),
+            border: UiRect::all(px(1)),
+            flex_direction: FlexDirection::Column,
+            row_gap: px(12),
+            border_radius: BorderRadius::all(px(16)),
             ..default()
         },
-        children![(
-            HudText,
-            label(hud_text(&hud, &score), 22.0, Color::srgb(0.9, 0.88, 0.75))
-        )],
+        BackgroundColor(Color::srgba(0.018, 0.055, 0.08, 0.94)),
+        BorderColor::all(Color::srgb(0.35, 0.31, 0.18)),
+        children![
+            label(Ui::Expedition.text(), 12.0, Color::srgb(0.42, 0.78, 0.75)),
+            (
+                WaveText,
+                label(
+                    Ui::HudWave.with([(Arg::Wave, hud.wave.to_string())]),
+                    32.0,
+                    Color::srgb(0.98, 0.86, 0.57)
+                )
+            ),
+            (
+                HudText,
+                label(hud_text(&hud, &score), 19.0, Color::srgb(0.78, 0.87, 0.87))
+            ),
+            (
+                Node { height: px(1), width: percent(100), ..default() },
+                BackgroundColor(Color::srgb(0.12, 0.23, 0.25))
+            ),
+            (
+                GrowthText,
+                label(
+                    Ui::HudGrowth.with([
+                        (Arg::Level, hud.level.to_string()),
+                        (Arg::Gauge, hud.evolution_percent.to_string())
+                    ]),
+                    15.0,
+                    Color::srgb(0.5, 0.87, 0.8)
+                )
+            ),
+            (
+                Node {
+                    width: percent(100),
+                    height: px(7),
+                    overflow: Overflow::clip(),
+                    border_radius: BorderRadius::all(px(4)),
+                    ..default()
+                },
+                BackgroundColor(Color::srgb(0.04, 0.12, 0.15)),
+                children![(
+                    GaugeFill,
+                    Node {
+                        width: percent(hud.evolution_percent as f32),
+                        height: percent(100),
+                        border_radius: BorderRadius::all(px(4)),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgb(0.19, 0.83, 0.7))
+                )],
+            ),
+        ],
     ));
     commands.spawn((
         DespawnOnExit(AppState::InGame),
         Node {
             position_type: PositionType::Absolute,
             right: px(24),
-            bottom: px(20),
+            top: px(24),
+            width: px(180),
+            border_radius: BorderRadius::all(px(16)),
+            padding: UiRect::all(px(16)),
+            flex_direction: FlexDirection::Column,
+            row_gap: px(12),
             ..default()
         },
-        children![label(Ui::Controls.text(), 16.0, Color::srgb(0.55, 0.6, 0.55))],
+        BackgroundColor(Color::srgba(0.018, 0.055, 0.08, 0.9)),
+        children![
+            (
+                ImageNode::new(server.load(keys::PUSHER_PORTRAIT)),
+                Node {
+                    width: px(112),
+                    height: px(92),
+                    align_self: AlignSelf::Center,
+                    ..default()
+                }
+            ),
+            label(Ui::Controls.text(), 14.0, Color::srgb(0.57, 0.73, 0.75)),
+        ],
     ));
 }
 
@@ -84,12 +172,27 @@ fn refresh_hud(
     hud: Res<HudModel>,
     score: Res<Score>,
     mut texts: Query<&mut I18nText, With<HudText>>,
+    mut waves: Query<&mut I18nText, WaveLabel>,
+    mut growth: Query<&mut I18nText, GrowthLabel>,
+    mut gauges: Query<&mut Node, With<GaugeFill>>,
 ) {
     if !hud.is_changed() && !score.is_changed() {
         return;
     }
     for mut text in &mut texts {
         *text = hud_text(&hud, &score);
+    }
+    for mut text in &mut waves {
+        *text = Ui::HudWave.with([(Arg::Wave, hud.wave.to_string())]);
+    }
+    for mut text in &mut growth {
+        *text = Ui::HudGrowth.with([
+            (Arg::Level, hud.level.to_string()),
+            (Arg::Gauge, hud.evolution_percent.to_string()),
+        ]);
+    }
+    for mut gauge in &mut gauges {
+        gauge.width = percent(hud.evolution_percent.min(100) as f32);
     }
 }
 

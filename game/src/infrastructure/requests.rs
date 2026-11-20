@@ -15,6 +15,7 @@ pub const TTL_FRAMES: u32 = 60;
 pub enum RequestKind {
     Navigate,
     SetLanguage,
+    SetRenderQuality,
     Start,
     Evolve,
     SelectMedal,
@@ -26,6 +27,7 @@ impl RequestKind {
         match request {
             Request::Navigate(_) => Self::Navigate,
             Request::SetLanguage(_) => Self::SetLanguage,
+            Request::SetRenderQuality(_) => Self::SetRenderQuality,
             Request::Start { .. } => Self::Start,
             Request::Evolve(_) => Self::Evolve,
             Request::SelectMedal(_) => Self::SelectMedal,
@@ -229,7 +231,8 @@ mod tests {
             RequestKind::SelectMedal,
             RequestKind::Navigate,
             RequestKind::SetLanguage,
-        ][usize::from(n % 6)]
+            RequestKind::SetRenderQuality,
+        ][usize::from(n % 7)]
     }
 
     fn request(n: u8) -> Request {
@@ -242,6 +245,9 @@ mod tests {
             RequestKind::Menu => Request::Menu,
             RequestKind::Navigate => Request::Navigate(crate::port::OutgameScreen::Title),
             RequestKind::SetLanguage => Request::SetLanguage(domain::progress::Language::Japanese),
+            RequestKind::SetRenderQuality => {
+                Request::SetRenderQuality(domain::progress::RenderQuality::High)
+            },
         }
     }
 

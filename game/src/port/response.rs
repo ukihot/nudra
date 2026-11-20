@@ -10,7 +10,7 @@ use domain::{
     evolution::EvolutionChoice,
     id::{EnemyId, GoalId, MedalCode, PusherCharacterId, StageId},
     motion::MedalMotion,
-    progress::Language,
+    progress::{Language, RenderQuality},
 };
 
 use super::Request;
@@ -74,6 +74,7 @@ pub struct StageRoster(pub Vec<StageEntry>);
 #[derive(Resource, Debug, Clone, Copy, Default, PartialEq)]
 pub struct OptionsModel {
     pub language: Language,
+    pub render_quality: RenderQuality,
 }
 
 /// インゲームHUD用の値。

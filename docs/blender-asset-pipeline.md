@@ -105,3 +105,31 @@ File > Export > glTF 2.0 (.glb)
 - カタパルト（`catapult/base`・`catapult/chute`）とアオウミウシ（`pusher/ao_umiushi`）は `visuals.visuals.ron` で `Model` に接続済み。
 - ノーマルメダルは `visuals.visuals.ron` の `"medal/normal"` を `Model(scene: "models/medals/medal_normal.glb#Scene0")` に書き換えれば差し替わる
   （LOD の使い分けは未実装。まず LOD1 の単独シーンでの確認を推奨）。
+
+## 6. 2026-11-20 の洗練パスと接続済みアセット
+
+上の1〜5章は初期制作時の記録。このパスでは原本 `nudra_assets.blend` を保持し、`nudra_refined.blend` を制作元に追加した。
+アート方針は「深海の真鍮製メダル筐体」。藍青・青緑・真鍮を基本色、発光シアンを落下と防衛の目印、珊瑚色・紫を敵の識別色にする。
+
+- `refine_assets.py`: 原本から再制作・書き出しする。Blender MCPではファイルを開く操作を単独の呼出で行い、次の呼出でスクリプトの `open_mainfile` 行を除いて実行する（同一呼出で開くとBlenderのUI contextが失効するため）。
+- `render_ui.py`: 洗練後のシーンから透過PNG `ui/ao_umiushi.png`（マスコット）と `ui/medal_normal.png` を制作。
+- `studio_lighting.py`: 外部素材に依存せず、ソフトボックス照明をHDR cubemapへ積分し、KTX2で書き出す。
+
+| 出力 | 内容・原点 |
+|---|---|
+| `stages/deck_refined.glb` | 床・金縁・岩・レール・象嵌・落下の発光目印。物理床の中心(0,-0.25,0)が原点 |
+| `stages/bridge_refined.glb` | 青緑の板橋と真鍮の装飾。物理側のローカルXが長軸、床中心が原点 |
+| `stages/spawn_refined.glb` | 3.2m四方の出現足場。橋のentryにある物理床の中心が原点 |
+| `stages/goal_sanctuary.glb` | 貝殻・真珠・真鍮の輪。原点は地面から1m上のGoalセンサー中心 |
+| `enemies/{grunt,brute,boss}.glb` | 珊瑚の小型甲殻、紫の重装甲、冠を持つ大型。原点は各カプセル中心 |
+| `medals/medal_normal.glb` | 金属の面取り・両面の渦刻印。半径0.28m・厚さ0.08m、1マテリアルの結合メッシュ |
+| `pushers/ao_umiushi.glb` | 青・黄・橙の外套膜と真珠色の斑点。物理中心を原点とする |
+| `catapult/catapult_{base,chute}.glb` | 深い青の金属・真鍮のリブ・発光する旋回台。射出口を原点とする |
+
+全11GLBを `visuals.visuals.ron` の `Model` に接続済み。ステージ全体のGLBから設備を読み取る移行（No.29）は引き続き別作業で、
+現状はRONの物理配置に合わせた各部品の個別接続。床のアセットに橋・Goal・カタパルトを含めず、重複表示を避ける。
+床上の縁飾りは薄い象嵌とし、壁のColliderは追加していない。左右全周が落下可能であり、発光部は推奨する押し出し位置を示す。
+初期メダル252枚は `layout_medals.py` で個別の位置を生成した不規則な俵積みへ変更し、レール前の山を作る。橋出口を塞ぐ旧配置から移動した。
+
+UIはモデル由来の透過アイコン、Wave・侵入数・撃破数・実ゲージ幅、枠付きのメダル選択欄を使用。日英の文言はi18nへ登録。
+描画設定と品質プリセットは[基本設計5.10](basic-design.md#510-レンダリングと映像品質プリセットrender-profile実装済み実機計測は継続)を参照する。
