@@ -129,3 +129,14 @@ pub enum GameResult {
 /// はアニメ・アセットの切り替えに読む。能力の発動も同じ値で決まるため、見た目とずれない。
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MedalMotionState(pub MedalMotion);
+
+/// 能力の適用が完了した（演出用の一過性の通知。基本設計
+/// 5.6）。移動を伴わない放電・爆発もこれで再生する。
+/// 確定と適用が終わった能力だけを通知する（実行待ち・棄却した能力からは出さない）。
+#[derive(Message, Debug, Clone, PartialEq)]
+pub struct AbilityCue {
+    pub medal: MedalCode,
+    /// 能力の番号（定義順）
+    pub index: usize,
+    pub at: Vec3,
+}

@@ -20,6 +20,7 @@ pub(crate) fn plugin(app: &mut App) {
     app.add_message::<SubmitRequest>()
         .add_message::<RequestOutcome>()
         .add_message::<DomainEventMsg>()
+        .add_message::<AbilityCue>()
         .init_resource::<ControlIntent>()
         .init_resource::<CharacterRoster>()
         .init_resource::<StageRoster>()

@@ -10,8 +10,8 @@ use std::{num::NonZeroU32, time::Duration};
 
 use anyhow::Context;
 use application::{
-    SelectMedalError, StartGameCommand, advance_waves, check_start, evolve, launch_medal,
-    record_result, resolve_physics, select_medal, start_game,
+    Budget, BudgetLimits, SelectMedalError, StartGameCommand, advance_waves, check_start, evolve,
+    launch_medal, record_result, resolve_physics, select_medal, start_game,
 };
 use avian3d::prelude::{Forces, Physics, PhysicsTime};
 // Bevy 0.20 の prelude は `ContextExt`（`.context()`）を含み `anyhow::Context`
@@ -38,7 +38,8 @@ use domain::{
 
 use super::{
     abilities::{
-        self, AbilityTimers, DefeatedEnemies, FallenMedals, MedalBodyData, PendingOrders, Touching,
+        self, AbilityBudget, AbilityEvents, AbilityTimers, DefeatedEnemies, FallenMedals,
+        MedalBodyData, NextTickEvents, SessionAbort, Touching,
     },
     data::{CharacterCatalog, Specs, StageCatalog},
     physics::{self, KILL_DEPTH, KillPlane, PendingFacts},
@@ -131,7 +132,9 @@ struct SessionCounter(u64);
 pub(super) fn plugin(app: &mut App) {
     use GameplaySet::*;
     app.init_resource::<PendingFacts>()
-        .init_resource::<PendingOrders>()
+        .init_resource::<AbilityEvents>()
+        .init_resource::<NextTickEvents>()
+        .init_resource::<SessionAbort>()
         .init_resource::<FallenMedals>()
         .init_resource::<Touching>()
         .init_resource::<DefeatedEnemies>()
@@ -163,8 +166,9 @@ pub(super) fn plugin(app: &mut App) {
             FixedUpdate,
             (
                 (
+                    abilities::begin_tick,
                     physics::collect_facts,
-                    abilities::medal_falls,
+                    abilities::resolve_falls,
                     resolve,
                     abilities::enemy_falls,
                 )
@@ -173,9 +177,10 @@ pub(super) fn plugin(app: &mut App) {
                 apply_intent.in_set(Command).run_if(can_advance),
                 (
                     abilities::collisions,
+                    abilities::observe_support,
                     abilities::observe_motion,
                     abilities::run_timers,
-                    abilities::execute_orders,
+                    abilities::resolve_abilities,
                     abilities::zones,
                     abilities::expire,
                 )
@@ -327,6 +332,16 @@ fn start_session(
         .context("normal medal spec is missing")?;
 
     world::spawn_stage(&mut commands, &out.stage, out.session.difficulty());
+    // 初期配置だけで生存数の上限を超えるステージは開始しない（基本設計 3.18）
+    let initial = out
+        .stage
+        .initial_medals()
+        .iter()
+        .map(|placement| placement.positions().count())
+        .sum::<usize>();
+    let budget = Budget::new(BudgetLimits::default(), u32::try_from(initial).unwrap_or(u32::MAX))
+        .context("the initial medals exceed the live medal limit")?;
+    commands.insert_resource(AbilityBudget(budget));
     let normal = out
         .session
         .medals()
@@ -417,8 +432,11 @@ fn end_session(mut commands: Commands, mut intent: ResMut<ControlIntent>) {
     commands.remove_resource::<KillPlane>();
     commands.insert_resource(MedalModel::default());
     commands.insert_resource(EvolutionModel::default());
-    // 盤面のEntityは消えるため、それを指す実行待ちの指示も捨てる
-    commands.insert_resource(PendingOrders::default());
+    // 盤面のEntityは消えるため、それを指す出来事・待ち行列・予算・中断の記録も捨てる
+    commands.insert_resource(AbilityEvents::default());
+    commands.insert_resource(NextTickEvents::default());
+    commands.insert_resource(SessionAbort::default());
+    commands.remove_resource::<AbilityBudget>();
     commands.insert_resource(FallenMedals::default());
     commands.insert_resource(DefeatedEnemies::default());
     // 押しっぱなしの意図を次のセッションへ持ち越さない
@@ -460,9 +478,18 @@ fn resolve(
 /// で）止まる。 落下・能力のどちらでゲージが満たされても、この1か所で切り替える。
 fn decide_phase(
     game: Res<ActiveGame>,
+    abort: Res<SessionAbort>,
     mut phase: ResMut<NextState<GamePhase>>,
+    mut app_state: ResMut<NextState<AppState>>,
     mut physics_time: ResMut<Time<Physics>>,
 ) {
+    // 承認後の予期しない失敗: 物理を止め、勝敗を確定せず（記録・保存せず）に選択へ戻す（基本設計
+    // 8.5）
+    if abort.0.is_some() {
+        physics_time.pause();
+        app_state.set(AppState::CharacterSelect);
+        return;
+    }
     let next = match game.session.ensure_running() {
         Ok(()) => return,
         Err(GameSessionError::EvolutionPending) => GamePhase::Evolving,
@@ -496,15 +523,23 @@ fn accept_evolution(
         let ActiveGame { session, catapult, .. } = &mut *game;
         let status = match evolve(session, catapult, &specs, evolution.clone()) {
             Ok(out) => {
-                // 盤面の同じ種のメダルも成長する（物理特性・能力・覚醒の予定を1回だけ作り直す）
+                // 盤面の同じ種のメダルも成長する（基本設計 3.16）:
+                // 既に高いLvの個体は下げず、同じLvの再反映はしない。
+                // 既存の予定・使用回数は保持し、新しいLvで増えた能力（覚醒）の予定だけを今から足す
                 if let DomainEvent::Evolved { medal, level } = &out.event {
                     for (entity, mut body, mut timers, motion) in &mut medals {
-                        if body.medal.0.medal() != medal {
+                        let old = body.medal.0.level();
+                        if body.medal.0.medal() != medal || *level <= old {
                             continue;
                         }
+                        let old_count = specs.abilities().abilities(medal, old).len();
                         body.medal.0.set_level(*level);
                         body.refresh(&specs, &mut commands);
-                        *timers = AbilityTimers::new(&specs, &body.medal.0, clock.now());
+                        timers.upgrade(
+                            old_count,
+                            specs.abilities().timers(medal, *level),
+                            clock.now(),
+                        );
                         abilities::resubscribe(
                             &mut commands,
                             entity,
@@ -525,13 +560,15 @@ fn accept_evolution(
 }
 
 /// 意図の反映: 旋回量を適用し、発射の意図があれば発射条件（クールダウン）を評価する。
+#[allow(clippy::too_many_arguments)]
 fn apply_intent(
     mut intent: ResMut<ControlIntent>,
     mut game: ResMut<ActiveGame>,
     clock: Res<GameClock>,
     specs: Res<Specs>,
     mut commands: Commands,
-    mut orders: ResMut<PendingOrders>,
+    mut budget: ResMut<AbilityBudget>,
+    mut ability_events: ResMut<AbilityEvents>,
     mut events: MessageWriter<DomainEventMsg>,
 ) {
     let ActiveGame { session, stage, catapult, .. } = &mut *game;
@@ -540,6 +577,10 @@ fn apply_intent(
         catapult.aim(aim, stage.catapult());
     }
     if !(intent.fire || intent.auto_fire) {
+        return;
+    }
+    // 盤面が満杯なら射出しない（クールダウン・成功通知を消費しない。基本設計 3.18）
+    if budget.reserve_launch().is_err() {
         return;
     }
     // 発射条件（クールダウン）が成立していなければ何もしない。却下ではない
@@ -552,19 +593,21 @@ fn apply_intent(
                 .unwrap_or(MedalLevel::MIN);
             abilities::spawn_medal(
                 &mut commands,
-                session,
                 &specs,
                 MedalUnit::new(out.plan.medal, level),
                 out.plan.origin,
                 out.plan.velocity,
                 &[Happening::Entered, Happening::Launched],
                 clock.now(),
-                &mut orders,
-                &mut events,
+                &mut ability_events,
             );
         },
-        Ok(None) => {},
-        Err(not_launchable) => debug!(%not_launchable, "fire intent ignored"),
+        // 射出しなかった: 予約した枠を戻す
+        Ok(None) => budget.medal_left(),
+        Err(not_launchable) => {
+            budget.medal_left();
+            debug!(%not_launchable, "fire intent ignored");
+        },
     }
 }
 
@@ -664,8 +707,8 @@ fn publish_models(
     evolution.set_if_neq(EvolutionModel(choices));
 }
 
-fn can_advance(game: Option<Res<ActiveGame>>) -> bool {
-    game.is_some_and(|game| game.session.ensure_running().is_ok())
+fn can_advance(game: Option<Res<ActiveGame>>, abort: Res<SessionAbort>) -> bool {
+    abort.0.is_none() && game.is_some_and(|game| game.session.ensure_running().is_ok())
 }
 
 fn resume_physics(mut time: ResMut<Time<Physics>>) {

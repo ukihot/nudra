@@ -2,6 +2,7 @@
 //! ユースケースは関数で、外側への指示は戻り値で返す。
 
 mod abilities;
+mod budget;
 mod evolve;
 mod launch_medal;
 mod progress;
@@ -11,9 +12,11 @@ mod start_game;
 mod waves;
 
 pub use abilities::{
-    AbilityOrder, EffectOrder, ExpireOutput, Firing, MarkOutput, expire_marks, fire_abilities,
-    hit_target, stand_in_zone,
+    AbilityOrder, AbilityPlan, ApproveError, ApprovedAbility, EffectOrder, ExpireOutput,
+    MarkOutput, Occasion, PlanRejection, StalePlan, approve_ability, commit_ability, expire_marks,
+    hit_target, need_of, plan_ability, stand_in_zone,
 };
+pub use budget::{Budget, BudgetExceeded, BudgetLimits, Need};
 pub use evolve::{EvolveOutput, evolve};
 pub use launch_medal::{LaunchMedalError, LaunchOutput, launch_medal};
 pub use progress::{

@@ -196,9 +196,12 @@ pub enum Effect {
     Revive {
         at: SpawnAt,
     },
-    /// 盤面で直前に発動した能力を、
-    /// この位置でもう一度発動する（[`crate::session::GameSession::fire_ability`]）
+    /// 盤面で直前に確定した非再生の能力を、今回の文脈（位置・
+    /// 相手）でもう一度実行する（[`crate::firing::plan`]）
     Replay,
+    /// 発動したメダル自身を、能力のコストとして消費する（爆弾の自爆。`Consumed`
+    /// で退場し、報酬なし）
+    Consume,
 }
 
 impl Effect {
@@ -211,6 +214,11 @@ impl Effect {
 
     pub fn is_state(&self) -> bool {
         matches!(self, Self::Mark { .. } | Self::Cleanse { .. })
+    }
+
+    /// 発動したメダル自身を消費する効果か（対象は要らない）。
+    pub fn consumes_source(&self) -> bool {
+        matches!(self, Self::Consume)
     }
 
     /// 場が中にいる対象へ付ける印（長さは余韻 `linger`）。場でなければ `None`。
@@ -241,13 +249,6 @@ pub struct AbilityRef {
     pub medal: MedalCode,
     pub level: MedalLevel,
     pub index: usize,
-}
-
-/// 実行する能力。`replayed` は再生（[`Effect::Replay`]）で、もう一度発動する直前の能力。
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct FiredAbility<'a> {
-    pub ability: &'a AbilityDef,
-    pub replayed: Option<&'a AbilityDef>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
@@ -493,6 +494,13 @@ mod tests {
     #[case::remove(Effect::Remove, false)]
     fn only_upward_pushes_lift(#[case] effect: Effect, #[case] lifts: bool) {
         assert_eq!(effect.lifts(), lifts);
+    }
+
+    #[rstest]
+    fn consuming_itself_is_an_action_without_targets() {
+        assert!(!Effect::Consume.is_state());
+        assert!(Effect::Consume.consumes_source());
+        assert!(!Effect::Remove.consumes_source());
     }
     #[rstest]
     fn only_marks_and_cleansing_are_state_effects() {

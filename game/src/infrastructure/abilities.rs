@@ -1,17 +1,21 @@
-//! メダルの能力の ECS 側（基本設計 3.14〜3.16）。
+//! メダルの能力の ECS 側（基本設計 3.14〜3.18）。
 //!
-//! 出来事（盤面に出た・射出・衝突・着地・静止・再始動・時限・落下）を検知して application の
-//! ユースケースに渡し、返った指示を実行する。ここで行うのは範囲内の対象の検索と物理だけで、
-//! 発動の可否・印・反応・生成するメダルのルールは持たない。
+//! - 収集（通常のSystem・並列Query）: 衝突・挙動・時限の出来事を [`AbilityEvents`]
+//!   に積む。並べ替えて順序を固定する
+//! - 確定（排他的System）: 出来事ごとに、能力1つずつ 「計画 → 対象の検索と適用前の検証 →
+//!   承認（鮮度と予算） → Domainの確定 → Worldへの直接反映 → 通知」を完了させてから次へ進む。
+//!   ループ内では `Commands` を使わない。次の能力は直前の生成・退場を反映したWorldを検索する
+//! - 承認の後に失敗し得る処理を残さない。それでも失敗したら [`SessionAbort`]
+//!   でセッションを安全に中断する（基本設計 8.5）
 //!
-//! 発動した指示は [`PendingOrders`] に積み、[`execute_orders`]
-//! がまとめて実行する（検知と実行を分ける）。
+//! ルール（発動の可否・印・反応・生成・世代・予算）は application / domain
+//! が持ち、ここは物理と範囲の検索だけを行う。
 
 use std::collections::HashSet;
 
 use application::{
-    AbilityOrder, EffectOrder, Firing, PhysicsFact, expire_marks, fire_abilities, hit_target,
-    stand_in_zone,
+    AbilityOrder, Budget, EffectOrder, Occasion, PhysicsFact, approve_ability, commit_ability,
+    expire_marks, hit_target, need_of, plan_ability, stand_in_zone,
 };
 use avian3d::prelude::*;
 use bevy::{
@@ -21,9 +25,8 @@ use bevy::{
 };
 use domain::{
     ability::{Area, Direction, Effect, Happening, Partner, SpawnAt, Target, Trigger},
-    mark::Modifiers,
-    motion::{MedalMotion, Motion, MotionEvent, MotionRules, MotionSample},
-    session::GameSession,
+    firing::triggered,
+    motion::{MedalMotion, Motion, MotionRules, MotionSample},
     spec::SpecCatalog,
     stage::{Shape, Stage},
     time::{Tick, Ticks},
@@ -36,7 +39,7 @@ use super::{
     session::{ActiveGame, GameClock},
     world::{Enemy, EnemyMarks, Medal, MedalBody, in_game, medal_bundle},
 };
-use crate::port::{Appearance, DomainEventMsg, MedalMotionState, Silhouette};
+use crate::port::{AbilityCue, Appearance, DomainEventMsg, MedalMotionState, Silhouette};
 
 // ── 調整ノブ ──────────────────────────────────────────────
 
@@ -44,30 +47,63 @@ use crate::port::{Appearance, DomainEventMsg, MedalMotionState, Silhouette};
 const SKY_HEIGHT: f32 = 6.0;
 /// その場に戻す・生成するときの、盤面からの高さ（m）。
 const SAFE_HEIGHT: f32 = 1.0;
-/// その場に生成するときの、1枚ごとのずらし（m）。
+/// 複数枚を生成するときの、1枚ごとのずらし（m）。
 const SPAWN_SPACING: f32 = 0.35;
 /// 場の表示の厚さ（m）。
 const ZONE_HEIGHT: f32 = 0.04;
 
 // ── Resource / Component ─────────────────────────────────
 
-/// 実行待ちの指示。
-#[derive(Resource, Debug, Default)]
-pub struct PendingOrders(Vec<Placed>);
-
-/// 位置の付いた指示。`touched` は衝突の相手（範囲 `Touched` の対象）。
-#[derive(Debug, Clone)]
-struct Placed {
-    order: AbilityOrder,
-    at: Vec3,
-    forward: Vec3,
-    source: Option<Entity>,
-    touched: Option<Entity>,
+/// メダルに起きた出来事（収集した文脈つき）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AbilityEvent {
+    pub entity: Entity,
+    pub happening: Happening,
+    pub at: Vec3,
+    pub forward: Vec3,
+    /// 衝突の相手（範囲 `Touched` の対象）
+    pub partner: Option<Entity>,
 }
 
-/// このtickに奈落へ落ちたメダル（物理の収集が積み、[`medal_falls`] が消費する）。
+impl AbilityEvent {
+    /// 確定の順序（基本設計 6.2）: 盤面に出た → 射出 → 衝突 → 挙動 → 時限。同じ種類はEntity順。
+    fn order_key(&self) -> (u8, Entity) {
+        let kind = match self.happening {
+            Happening::Entered => 0,
+            Happening::Launched => 1,
+            Happening::Collided(_) => 2,
+            Happening::Motion(_) => 3,
+            Happening::Due(_) => 4,
+            Happening::SelfFell | Happening::OtherFell => 5,
+        };
+        (kind, self.entity)
+    }
+}
+
+/// このtickに収集した出来事。
+#[derive(Resource, Debug, Default)]
+pub struct AbilityEvents(pub Vec<AbilityEvent>);
+
+/// 次のtickに処理する出来事（生成した子の `Entered`）。予算の待ち行列の枠を予約してから積む。
+#[derive(Resource, Debug, Default)]
+pub struct NextTickEvents(pub Vec<AbilityEvent>);
+
+/// 能力の実行時予算（基本設計 3.18）。セッション開始時に初期配置の枚数で作る。
+#[derive(Resource, Debug, Deref, DerefMut)]
+pub struct AbilityBudget(pub Budget);
+
+/// 承認の後に起きた予期しない失敗。立ったらゲーム進行を止め、勝敗を確定せずに選択へ戻す（基本設計
+/// 8.5）。
+#[derive(Resource, Debug, Default)]
+pub struct SessionAbort(pub Option<String>);
+
+/// このtickに奈落へ落ちたメダル（物理の収集が積む）。
 #[derive(Resource, Debug, Default)]
 pub struct FallenMedals(pub EntityHashSet);
+
+/// このtickに撃破が確定した敵の数（`OtherFell` の通知に使う）。
+#[derive(Resource, Debug, Default)]
+pub struct DefeatedEnemies(pub usize);
 
 /// このtickに盤面へ触れた、飛行中のメダル（着地の判定に使う）。
 #[derive(Resource, Debug, Default)]
@@ -94,9 +130,24 @@ impl AbilityTimers {
                 .collect(),
         )
     }
+
+    /// 進化で増えた能力（覚醒）の予定だけを足す。既存の予定は期限も処理済みも変えない。
+    pub fn upgrade(
+        &mut self,
+        old_count: usize,
+        timers: impl IntoIterator<Item = (usize, Ticks, Option<Ticks>)>,
+        now: Tick,
+    ) {
+        self.0.extend(
+            timers
+                .into_iter()
+                .filter(|(index, ..)| *index >= old_count)
+                .map(|(index, after, every)| Due { index, at: now + after, every }),
+        );
+    }
 }
 
-/// 場。中にいる対象へ印を付け続ける（基本設計 3.14）。
+/// 場。中にいる対象へ印を付ける（基本設計 3.14）。
 #[derive(Component, Debug, Clone)]
 pub struct ZoneField {
     effect: Effect,
@@ -105,7 +156,7 @@ pub struct ZoneField {
     until: Tick,
 }
 
-/// メダルの物理特性を、種類・レベル・印から作り直すためのまとまり。
+/// メダルの物理特性を、種類・レベル・印から作り直すためのまとまり（通常のSystem用）。
 #[derive(QueryData)]
 #[query_data(mutable)]
 pub struct MedalBodyData {
@@ -123,13 +174,10 @@ pub struct MedalBodyData {
 impl MedalBodyDataItem<'_, '_> {
     /// 定義の値に印の効き目を掛けた物理特性と見た目を反映する（変わったときに1回だけ呼ぶ）。
     pub fn refresh(&mut self, specs: &SpecCatalog, commands: &mut Commands) {
-        let unit = &self.medal.0;
-        let Some(spec) = specs.medal(unit.medal(), unit.level()) else {
-            warn!(medal = %unit.medal(), "medal spec is missing");
+        let Some(body) = body_of(specs, &self.medal.0) else {
             return;
         };
-        let body = MedalBody::new(spec, &unit.modifiers(specs.abilities()));
-        let key = Appearance::medal_key(unit.medal());
+        let key = Appearance::medal_key(self.medal.0.medal());
         *self.mass = body.mass;
         *self.collider = body.collider;
         *self.friction = body.friction;
@@ -144,109 +192,48 @@ impl MedalBodyDataItem<'_, '_> {
     }
 }
 
-// ── 発動と指示の積み込み ──────────────────────────────────
-
-fn queue(
-    firing: Firing,
-    placed: (Vec3, Vec3),
-    source: Option<Entity>,
-    touched: Option<Entity>,
-    orders: &mut PendingOrders,
-    events: &mut MessageWriter<DomainEventMsg>,
-) {
-    let (at, forward) = placed;
-    events.write_batch(firing.events.into_iter().map(DomainEventMsg));
-    orders
-        .0
-        .extend(firing.orders.into_iter().map(|order| Placed {
-            order,
-            at,
-            forward,
-            source,
-            touched,
-        }));
+fn body_of(specs: &SpecCatalog, unit: &MedalUnit) -> Option<MedalBody> {
+    let Some(spec) = specs.medal(unit.medal(), unit.level()) else {
+        warn!(medal = %unit.medal(), "medal spec is missing");
+        return None;
+    };
+    Some(MedalBody::new(spec, &unit.modifiers(specs.abilities())))
 }
+
+/// 排他的System用: 物理特性と見た目をWorldへ直接反映する。
+fn refresh_in_world(world: &mut World, entity: Entity, specs: &SpecCatalog) {
+    let Some((body, key)) = world
+        .get::<Medal>(entity)
+        .and_then(|m| body_of(specs, &m.0).map(|b| (b, Appearance::medal_key(m.0.medal()))))
+    else {
+        return;
+    };
+    let mut e = world.entity_mut(entity);
+    if let Some(mut mass) = e.get_mut::<Mass>() {
+        *mass = body.mass;
+    }
+    if let Some(mut collider) = e.get_mut::<Collider>() {
+        *collider = body.collider;
+    }
+    if let Some(mut friction) = e.get_mut::<Friction>() {
+        *friction = body.friction;
+    }
+    if e.get::<CollisionLayers>() != Some(&body.layers) {
+        e.insert(body.layers);
+    }
+    if let Some(mut appearance) = e.get_mut::<Appearance>() {
+        if appearance.key != key {
+            appearance.key = key.into();
+        }
+        appearance.silhouette = body.silhouette;
+    }
+}
+
+// ── 位置と範囲 ────────────────────────────────────────────
 
 /// 速度の向き（止まっていれば奥）。前方の範囲と押す向きの基準。
 fn forward(velocity: Vec3) -> Vec3 {
     Vec3::new(velocity.x, 0.0, velocity.z).normalize_or(Vec3::NEG_Z)
-}
-
-/// 衝突の能力を持つか（持たないメダルは、着地した後は衝突の出来事を受け取らない。
-/// 数千枚の性能のため）。
-fn listens_to_collisions(specs: &SpecCatalog, unit: &MedalUnit) -> bool {
-    specs
-        .abilities()
-        .abilities(unit.medal(), unit.level())
-        .iter()
-        .any(|a| matches!(a.on, Trigger::Collide(_)))
-}
-
-/// 衝突の受信を、能力構成と挙動に合わせて見直す（変化・進化の後。基本設計 5.4）。
-pub(super) fn resubscribe(
-    commands: &mut Commands,
-    entity: Entity,
-    specs: &SpecCatalog,
-    unit: &MedalUnit,
-    motion: Motion,
-) {
-    if listens_to_collisions(specs, unit) || motion == Motion::Flying {
-        commands.entity(entity).insert(CollisionEventsEnabled);
-    } else {
-        commands
-            .entity(entity)
-            .remove::<CollisionEventsEnabled>();
-    }
-}
-
-/// メダルを盤面に出す。予定と衝突の受信を整え、盤面に出た（射出なら射出も）能力を発動する。
-#[allow(clippy::too_many_arguments)]
-pub fn spawn_medal(
-    commands: &mut Commands,
-    session: &mut GameSession,
-    specs: &SpecCatalog,
-    mut unit: MedalUnit,
-    position: Vec3,
-    velocity: Vec3,
-    happenings: &[Happening],
-    now: Tick,
-    orders: &mut PendingOrders,
-    events: &mut MessageWriter<DomainEventMsg>,
-) -> Option<Entity> {
-    let Some(spec) = specs.medal(unit.medal(), unit.level()).copied() else {
-        warn!(medal = %unit.medal(), "cannot spawn a medal without a spec");
-        return None;
-    };
-    let entity = commands.spawn_empty().id();
-    for &happening in happenings {
-        let firing = fire_abilities(session, specs, &mut unit, happening);
-        queue(
-            firing,
-            (position, forward(velocity)),
-            Some(entity),
-            None,
-            orders,
-            events,
-        );
-    }
-    let timers = AbilityTimers::new(specs, &unit, now);
-    let modifiers = unit.modifiers(specs.abilities());
-    // 射出も生成も宙から始まる。着地を検知するため、飛行中は衝突を受け取る（着地後、
-    // 衝突の能力が無ければ外す）
-    commands.entity(entity).insert((
-        medal_bundle(
-            unit,
-            &spec,
-            &modifiers,
-            Transform::from_translation(position),
-            MedalMotion::launched(),
-        ),
-        LinearVelocity(velocity),
-        CollisionEventsEnabled,
-    ));
-    // 予定は既定（空）を上書きする
-    commands.entity(entity).insert(timers);
-    Some(entity)
 }
 
 /// 水平位置が盤面の上か（盤面の中心は原点）。
@@ -269,321 +256,6 @@ fn spawn_point(at: SpawnAt, here: Vec3, stage: &Stage) -> Vec3 {
         _ => stage.catapult().position(),
     }
 }
-
-// ── 落下（Resolve） ───────────────────────────────────────
-
-/// 落下の処理で使うメダルの Query（自分が落ちた・他が落ちたの両方で使う）。
-pub type FallMedals<'w, 's> = Query<
-    'w,
-    's,
-    (
-        Entity,
-        &'static mut Medal,
-        &'static mut Position,
-        &'static mut LinearVelocity,
-        &'static mut MedalMotionState,
-    ),
->;
-
-/// このtickに撃破が確定した敵の数（Domain の `enemy_fell` の結果。`OtherFell` の通知に使う）。
-#[derive(Resource, Debug, Default)]
-pub struct DefeatedEnemies(pub usize);
-
-/// 落ちたメダル: 自分が落ちた能力（復活なら盤面へ戻す）を判定してから退場を確定し、
-/// 報酬資格のある落下だけの価値をゲージの事実にする。復活しなかった個体ごとに `OtherFell`
-/// を通知する。 並列収集・ハッシュ集合の順序に依存しないよう、Entity順に処理する（基本設計 6.2）。
-#[allow(clippy::too_many_arguments)]
-pub fn medal_falls(
-    mut fallen: ResMut<FallenMedals>,
-    mut game: ResMut<ActiveGame>,
-    specs: Res<Specs>,
-    mut medals: FallMedals,
-    mut facts: ResMut<PendingFacts>,
-    mut orders: ResMut<PendingOrders>,
-    mut events: MessageWriter<DomainEventMsg>,
-    mut commands: Commands,
-) {
-    if fallen.0.is_empty() {
-        return;
-    }
-    let mut falling: Vec<Entity> = fallen.0.drain().collect();
-    falling.sort_unstable();
-    let ActiveGame { session, stage, .. } = &mut *game;
-    let book = specs.abilities();
-    let mut value = 0.0;
-    let mut fell = Vec::with_capacity(falling.len());
-    for entity in falling {
-        let Ok((entity, mut medal, mut position, mut velocity, mut motion)) =
-            medals.get_mut(entity)
-        else {
-            continue;
-        };
-        // 落下地点（自分が落ちた能力の位置、`Here` の復活の基準）
-        let at = position.0;
-        let firing = fire_abilities(session, &specs, &mut medal.0, Happening::SelfFell);
-        let revive = firing
-            .orders
-            .iter()
-            .flat_map(|o| &o.actions)
-            .find_map(|a| match a {
-                EffectOrder::Apply(Effect::Revive { at }) => Some(*at),
-                _ => None,
-            });
-        queue(
-            firing,
-            (at, Vec3::NEG_Z),
-            Some(entity),
-            None,
-            &mut orders,
-            &mut events,
-        );
-        match revive {
-            Some(revive_at) => {
-                // 位置・描画用Transform・
-                // 速度をそろえて戻す（Avianが古いTransformから位置を戻さないように）
-                let to = spawn_point(revive_at, at, stage);
-                position.0 = to;
-                velocity.0 = Vec3::ZERO;
-                motion.0.lift();
-                commands
-                    .entity(entity)
-                    .insert((Transform::from_translation(to), CollisionEventsEnabled));
-            },
-            // 復活しなかった: 奈落への退場を確定する。報酬は資格のある個体だけ（基本設計 3.18）
-            None => {
-                value += medal
-                    .0
-                    .exit_reward(MedalExitReason::FellIntoAbyss, book);
-                fell.push(entity);
-                commands.entity(entity).try_despawn();
-            },
-        }
-    }
-    notify_other_fell(
-        fell.len(),
-        &fell,
-        &mut medals,
-        session,
-        &specs,
-        &mut orders,
-        &mut events,
-    );
-    if value > 0.0 {
-        facts.0.push(PhysicsFact::MedalsFell(value));
-    }
-}
-
-/// 敵の撃破が確定した数だけ、生存しているメダルへ `OtherFell` を通知する（基本設計 4.3）。
-pub fn enemy_falls(
-    mut defeated: ResMut<DefeatedEnemies>,
-    mut medals: FallMedals,
-    mut game: ResMut<ActiveGame>,
-    specs: Res<Specs>,
-    mut orders: ResMut<PendingOrders>,
-    mut events: MessageWriter<DomainEventMsg>,
-) {
-    let times = std::mem::take(&mut defeated.0);
-    if times > 0 {
-        notify_other_fell(
-            times,
-            &[],
-            &mut medals,
-            &mut game.session,
-            &specs,
-            &mut orders,
-            &mut events,
-        );
-    }
-}
-
-/// 退場した数だけ、`OtherFell` の能力を持つ生存メダルへ通知する。退場した本人（`exclude`）は除く。
-fn notify_other_fell(
-    times: usize,
-    exclude: &[Entity],
-    medals: &mut FallMedals,
-    session: &mut GameSession,
-    specs: &SpecCatalog,
-    orders: &mut PendingOrders,
-    events: &mut MessageWriter<DomainEventMsg>,
-) {
-    let book = specs.abilities();
-    for _ in 0..times {
-        for (entity, mut medal, position, velocity, _) in medals.iter_mut() {
-            if exclude.contains(&entity)
-                || book
-                    .triggered(medal.0.medal(), medal.0.level(), Happening::OtherFell)
-                    .next()
-                    .is_none()
-            {
-                continue;
-            }
-            let firing = fire_abilities(session, specs, &mut medal.0, Happening::OtherFell);
-            queue(
-                firing,
-                (position.0, forward(velocity.0)),
-                Some(entity),
-                None,
-                orders,
-                events,
-            );
-        }
-    }
-}
-
-// ── 出来事の検知（Abilities） ─────────────────────────────
-
-/// 衝突: 飛行中のメダルが盤面に触れたこと（着地の判定）と、メダル・敵とぶつかった能力。
-#[allow(clippy::too_many_arguments)]
-pub fn collisions(
-    mut collisions: MessageReader<CollisionStart>,
-    mut medals: Query<(&mut Medal, &Position, &LinearVelocity, &MedalMotionState)>,
-    enemies: Query<(), With<Enemy>>,
-    sensors: Query<(), With<Sensor>>,
-    mut seen: Local<HashSet<(Entity, Entity)>>,
-    mut touching: ResMut<Touching>,
-    mut game: ResMut<ActiveGame>,
-    specs: Res<Specs>,
-    mut orders: ResMut<PendingOrders>,
-    mut events: MessageWriter<DomainEventMsg>,
-) {
-    touching.0.clear();
-    seen.clear();
-    for c in collisions.read() {
-        // 同じ接触開始のペアはtick内で1回だけ（両側をそれぞれ判定する）
-        let pair = if c.collider1 < c.collider2 {
-            (c.collider1, c.collider2)
-        } else {
-            (c.collider2, c.collider1)
-        };
-        if !seen.insert(pair) {
-            continue;
-        }
-        for (me, other) in [(c.collider1, c.collider2), (c.collider2, c.collider1)] {
-            let partner = if enemies.contains(other) {
-                Some(Partner::Enemy)
-            } else if medals.contains(other) {
-                Some(Partner::Medal)
-            } else {
-                None
-            };
-            let Ok((mut medal, position, velocity, motion)) = medals.get_mut(me) else {
-                continue;
-            };
-            if motion.0.state() == Motion::Flying && !sensors.contains(other) {
-                touching.0.insert(me);
-            }
-            let Some(partner) = partner else {
-                continue;
-            };
-            let firing = fire_abilities(
-                &mut game.session,
-                &specs,
-                &mut medal.0,
-                Happening::Collided(partner),
-            );
-            queue(
-                firing,
-                (position.0, forward(velocity.0)),
-                Some(me),
-                Some(other),
-                &mut orders,
-                &mut events,
-            );
-        }
-    }
-}
-
-/// 挙動ステータスの観測（数千枚を並列に）。状態が変わったメダルの能力を発動する。
-#[allow(clippy::too_many_arguments)]
-pub fn observe_motion(
-    mut medals: Query<(Entity, &mut MedalMotionState, &LinearVelocity, &mut Medal, &Position)>,
-    touching: Res<Touching>,
-    clock: Res<GameClock>,
-    mut changed: Local<Parallel<Vec<(Entity, MotionEvent)>>>,
-    mut game: ResMut<ActiveGame>,
-    specs: Res<Specs>,
-    mut orders: ResMut<PendingOrders>,
-    mut events: MessageWriter<DomainEventMsg>,
-    mut commands: Commands,
-) {
-    let now = clock.now();
-    let rules = MotionRules::default();
-    medals
-        .par_iter_mut()
-        .for_each(|(entity, mut motion, velocity, _, _)| {
-            let sample = MotionSample {
-                speed: velocity.length(),
-                grounded: touching.0.contains(&entity),
-            };
-            // 状態が変わらない大多数のメダルで変更を立てないよう、写しで観測する
-            let mut next = motion.0;
-            if let Some(event) = next.observe(sample, now, &rules) {
-                motion.0 = next;
-                changed.scope(|v| v.push((entity, event)));
-            } else if next != motion.0 {
-                motion.bypass_change_detection().0 = next;
-            }
-        });
-    // 並列収集の順序に依存しないよう、Entity順に発動する（基本設計 6.2）
-    let mut changed: Vec<_> = changed.drain().collect();
-    changed.sort_unstable_by_key(|(entity, _)| *entity);
-    for (entity, event) in changed {
-        let Ok((_, _, velocity, mut medal, position)) = medals.get_mut(entity) else {
-            continue;
-        };
-        let firing =
-            fire_abilities(&mut game.session, &specs, &mut medal.0, Happening::Motion(event));
-        queue(
-            firing,
-            (position.0, forward(velocity.0)),
-            Some(entity),
-            None,
-            &mut orders,
-            &mut events,
-        );
-        if event == MotionEvent::Landed && !listens_to_collisions(&specs, &medal.0) {
-            commands
-                .entity(entity)
-                .remove::<CollisionEventsEnabled>();
-        }
-    }
-}
-
-/// 時限・間隔の能力。
-#[allow(clippy::too_many_arguments)]
-pub fn run_timers(
-    mut medals: Query<(Entity, &mut AbilityTimers, &mut Medal, &Position, &LinearVelocity)>,
-    clock: Res<GameClock>,
-    mut game: ResMut<ActiveGame>,
-    specs: Res<Specs>,
-    mut orders: ResMut<PendingOrders>,
-    mut events: MessageWriter<DomainEventMsg>,
-) {
-    let now = clock.now();
-    for (entity, mut timers, mut medal, position, velocity) in &mut medals {
-        if !timers.0.iter().any(|d| d.at <= now) {
-            continue;
-        }
-        for due in timers.0.iter_mut().filter(|d| d.at <= now) {
-            let firing =
-                fire_abilities(&mut game.session, &specs, &mut medal.0, Happening::Due(due.index));
-            queue(
-                firing,
-                (position.0, forward(velocity.0)),
-                Some(entity),
-                None,
-                &mut orders,
-                &mut events,
-            );
-            if let Some(every) = due.every {
-                due.at = now + every;
-            }
-        }
-        timers.0.retain(|d| d.at > now);
-    }
-}
-
-// ── 指示の実行（Abilities） ───────────────────────────────
 
 fn in_area(area: Area, at: Vec3, forward: Vec3, p: Vec3) -> bool {
     match area {
@@ -615,89 +287,403 @@ fn push_direction(dir: Direction, at: Vec3, forward: Vec3, p: Vec3) -> Vec3 {
     }
 }
 
-type MedalTargets<'w, 's> =
-    Query<'w, 's, (Entity, MedalBodyData, Forces, &'static mut MedalMotionState), Without<Enemy>>;
-type EnemyPositions<'w, 's> =
-    Query<'w, 's, (&'static mut EnemyMarks, &'static Position), (With<Enemy>, Without<Medal>)>;
-type EnemyTargets<'w, 's> =
-    Query<'w, 's, (Entity, &'static mut EnemyMarks, Forces), (With<Enemy>, Without<Medal>)>;
+/// 衝突の能力を持つか（持たないメダルは、着地した後は衝突の出来事を受け取らない。
+/// 数千枚の性能のため）。
+fn listens_to_collisions(specs: &SpecCatalog, unit: &MedalUnit) -> bool {
+    specs
+        .abilities()
+        .abilities(unit.medal(), unit.level())
+        .iter()
+        .any(|a| matches!(a.on, Trigger::Collide(_)))
+}
 
-/// 範囲内の対象（メダル・敵）。
+/// 衝突の受信を、能力構成と挙動に合わせて見直す（変化・進化の後。基本設計 5.4）。
+pub(super) fn resubscribe(
+    commands: &mut Commands,
+    entity: Entity,
+    specs: &SpecCatalog,
+    unit: &MedalUnit,
+    motion: Motion,
+) {
+    if listens_to_collisions(specs, unit) || motion == Motion::Flying {
+        commands.entity(entity).insert(CollisionEventsEnabled);
+    } else {
+        commands
+            .entity(entity)
+            .remove::<CollisionEventsEnabled>();
+    }
+}
+
+// ── 盤面に出す（能力の確定の外。射出・テスト） ───────────────
+
+/// メダルを宙に出し、`happenings`（射出なら `Entered` と `Launched`）を今tickの出来事に積む。
+/// 盤面の生存数の予約は呼び出し側が済ませる（射出: `Budget::reserve_launch`）。
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_medal(
+    commands: &mut Commands,
+    specs: &SpecCatalog,
+    unit: MedalUnit,
+    position: Vec3,
+    velocity: Vec3,
+    happenings: &[Happening],
+    now: Tick,
+    events: &mut AbilityEvents,
+) -> Option<Entity> {
+    let spec = specs.medal(unit.medal(), unit.level()).copied()?;
+    let timers = AbilityTimers::new(specs, &unit, now);
+    let modifiers = unit.modifiers(specs.abilities());
+    let entity = commands
+        .spawn((
+            medal_bundle(
+                unit,
+                &spec,
+                &modifiers,
+                Transform::from_translation(position),
+                MedalMotion::launched(),
+            ),
+            Position(position),
+            LinearVelocity(velocity),
+            CollisionEventsEnabled,
+        ))
+        .id();
+    // 予定は既定（空）を上書きする
+    commands.entity(entity).insert(timers);
+    events
+        .0
+        .extend(happenings.iter().map(|&happening| AbilityEvent {
+            entity,
+            happening,
+            at: position,
+            forward: forward(velocity),
+            partner: None,
+        }));
+    Some(entity)
+}
+
+/// 排他的System内での生成（能力の生成・分割）。位置・速度を明示し、子の `Entered` は次tickへ。
+fn spawn_child(
+    world: &mut World,
+    specs: &SpecCatalog,
+    unit: MedalUnit,
+    position: Vec3,
+    now: Tick,
+    next: &mut Vec<AbilityEvent>,
+) {
+    let Some(spec) = specs.medal(unit.medal(), unit.level()).copied() else {
+        return;
+    };
+    let timers = AbilityTimers::new(specs, &unit, now);
+    let modifiers = unit.modifiers(specs.abilities());
+    let entity = world
+        .spawn((
+            medal_bundle(
+                unit,
+                &spec,
+                &modifiers,
+                Transform::from_translation(position),
+                MedalMotion::launched(),
+            ),
+            Position(position),
+            LinearVelocity::ZERO,
+            CollisionEventsEnabled,
+        ))
+        .id();
+    world.entity_mut(entity).insert(timers);
+    next.push(AbilityEvent {
+        entity,
+        happening: Happening::Entered,
+        at: position,
+        forward: Vec3::NEG_Z,
+        partner: None,
+    });
+}
+
+// ── 1能力の確定 ───────────────────────────────────────────
+
+/// 確定の結果。
+enum Committed {
+    /// 適用まで完了した。`revive` は復活の位置
+    Applied { revive: Option<SpawnAt> },
+    /// 計画・検証・承認で成り立たなかった（何も変えていない）
+    Rejected,
+}
+
+/// 範囲内の対象（メダル・敵）。同tickに退場が確定した個体は除く。Entity順。
 fn targets(
-    placed: &Placed,
-    medals: &MedalTargets,
-    enemies: &EnemyTargets,
+    world: &mut World,
+    order: &AbilityOrder,
+    ev: &AbilityEvent,
+    gone: &EntityHashSet,
 ) -> (Vec<Entity>, Vec<Entity>) {
-    let order = &placed.order;
     let wants = |medal: bool| match order.target {
         Target::Itself => false,
         Target::Medals => medal,
         Target::Enemies => !medal,
         Target::Both => true,
     };
+    let alive = |e: &Entity| !gone.contains(e);
     if order.target == Target::Itself || order.area == Area::Touched {
         let one = if order.target == Target::Itself {
-            placed.source
+            Some(ev.entity)
         } else {
-            placed.touched
+            ev.partner
         };
-        let Some(one) = one else {
+        let Some(one) = one.filter(alive) else {
             return (Vec::new(), Vec::new());
         };
-        let is_medal = medals.contains(one);
-        return match (is_medal, enemies.contains(one)) {
+        let is_medal = world.get::<Medal>(one).is_some();
+        let is_enemy = world.get::<Enemy>(one).is_some();
+        return match (is_medal, is_enemy) {
             (true, _) if order.target == Target::Itself || wants(true) => (vec![one], Vec::new()),
             (_, true) if wants(false) => (Vec::new(), vec![one]),
             _ => (Vec::new(), Vec::new()),
         };
     }
-    let hit = |p: Vec3| in_area(order.area, placed.at, placed.forward, p);
-    let medal_targets = if wants(true) {
-        medals
-            .iter()
-            .filter(|(e, ..)| Some(*e) != placed.source)
-            .filter(|(_, _, f, _)| hit(f.position()))
-            .map(|(e, ..)| e)
-            .collect()
+    let hit = |p: Vec3| in_area(order.area, ev.at, ev.forward, p);
+    let medals = if wants(true) {
+        let mut q = world.query_filtered::<(Entity, &Position), With<Medal>>();
+        let mut found: Vec<Entity> = q
+            .iter(world)
+            .filter(|(e, p)| *e != ev.entity && alive(e) && hit(p.0))
+            .map(|(e, _)| e)
+            .collect();
+        found.sort_unstable();
+        found
     } else {
         Vec::new()
     };
-    let enemy_targets = if wants(false) {
-        enemies
-            .iter()
-            .filter(|(_, _, f)| hit(f.position()))
-            .map(|(e, ..)| e)
-            .collect()
+    let enemies = if wants(false) {
+        let mut q = world.query_filtered::<(Entity, &Position), (With<Enemy>, Without<Medal>)>();
+        let mut found: Vec<Entity> = q
+            .iter(world)
+            .filter(|(e, p)| alive(e) && hit(p.0))
+            .map(|(e, _)| e)
+            .collect();
+        found.sort_unstable();
+        found
     } else {
         Vec::new()
     };
-    (medal_targets, enemy_targets)
+    (medals, enemies)
 }
 
-/// 積まれた指示を実行する。場と生成は指示ごとに1回、それ以外は範囲内の対象それぞれに。
-#[allow(clippy::too_many_arguments)]
-pub fn execute_orders(
-    mut orders: ResMut<PendingOrders>,
-    mut medals: MedalTargets,
-    mut enemies: EnemyTargets,
-    mut game: ResMut<ActiveGame>,
-    specs: Res<Specs>,
-    clock: Res<GameClock>,
-    mut events: MessageWriter<DomainEventMsg>,
-    mut commands: Commands,
-) {
-    if orders.0.is_empty() {
+/// 押す（速度へ直接。質量で割る）。上へ押されたメダルは飛行中に戻り、着地でまた発動する。
+fn push(world: &mut World, target: Entity, dir: Direction, strength: f32, ev: &AbilityEvent) {
+    let Some(position) = world.get::<Position>(target).map(|p| p.0) else {
         return;
+    };
+    let mass = world
+        .get::<Mass>(target)
+        .map_or(1.0, |m| m.0.max(f32::EPSILON));
+    if let Some(mut velocity) = world.get_mut::<LinearVelocity>(target) {
+        velocity.0 += push_direction(dir, ev.at, ev.forward, position) * strength / mass;
     }
-    let now = clock.now();
-    // 実行中に生成したメダルの指示は次のtickに実行する
-    let placed_orders = std::mem::take(&mut orders.0);
-    for placed in placed_orders {
-        let order = &placed.order;
+    if dir == Direction::Up && world.get::<Medal>(target).is_some() {
+        if let Some(mut motion) = world.get_mut::<MedalMotionState>(target) {
+            motion.0.lift();
+        }
+        world.entity_mut(target).insert(CollisionEventsEnabled);
+    }
+}
+
+/// 対象のメダル1枚に、状態の効果と動作を当てる。
+#[allow(clippy::too_many_arguments)]
+fn apply_to_medal(
+    world: &mut World,
+    specs: &SpecCatalog,
+    budget: &mut Budget,
+    order: &AbilityOrder,
+    ev: &AbilityEvent,
+    target: Entity,
+    now: Tick,
+    gone: &mut EntityHashSet,
+    next: &mut Vec<AbilityEvent>,
+) {
+    let mut reactions = Vec::new();
+    if !order.states.is_empty() {
+        let Some(out) = world
+            .get_mut::<Medal>(target)
+            .map(|mut medal| hit_target(specs, medal.0.conditions_mut(), &order.states, now))
+        else {
+            return;
+        };
+        if out.modifiers.is_some() {
+            refresh_in_world(world, target, specs);
+        }
+        reactions = out.reactions;
+    }
+    let actions = order
+        .actions
+        .iter()
+        .cloned()
+        .chain(reactions.into_iter().map(EffectOrder::Apply));
+    for action in actions {
+        if gone.contains(&target) {
+            return;
+        }
+        match action {
+            EffectOrder::Apply(Effect::Push { dir, strength }) => {
+                push(world, target, dir, strength.get(), ev);
+            },
+            EffectOrder::Apply(Effect::Remove) => {
+                // 能力による消滅（DestroyedByAbility）。報酬・落下の通知なし
+                if world.despawn(target) {
+                    budget.medal_left();
+                    gone.insert(target);
+                }
+            },
+            EffectOrder::Apply(Effect::Split) => {
+                let half = world.get::<Medal>(target).map(|m| m.0.split_off());
+                let position = world.get::<Position>(target).map(|p| p.0);
+                if let (Some(half), Some(position)) = (half, position) {
+                    spawn_child(world, specs, half, position + Vec3::Y * 0.2, now, next);
+                }
+            },
+            EffectOrder::Transform { medal, level } => {
+                let listens = {
+                    let Some(mut m) = world.get_mut::<Medal>(target) else {
+                        return;
+                    };
+                    m.0.transform(medal, level);
+                    listens_to_collisions(specs, &m.0)
+                };
+                refresh_in_world(world, target, specs);
+                let flying = world
+                    .get::<MedalMotionState>(target)
+                    .is_some_and(|m| m.0.state() == Motion::Flying);
+                if listens || flying {
+                    world.entity_mut(target).insert(CollisionEventsEnabled);
+                } else {
+                    world
+                        .entity_mut(target)
+                        .remove::<CollisionEventsEnabled>();
+                }
+            },
+            _ => {},
+        }
+    }
+}
+
+/// 対象の敵1体に、状態の効果と押す動作を当てる（敵を消す効果は読込時に拒否済み）。
+fn apply_to_enemy(
+    world: &mut World,
+    specs: &SpecCatalog,
+    order: &AbilityOrder,
+    ev: &AbilityEvent,
+    target: Entity,
+    now: Tick,
+) {
+    let mut reactions = Vec::new();
+    if !order.states.is_empty() {
+        let Some(mut marks) = world.get_mut::<EnemyMarks>(target) else {
+            return;
+        };
+        let out = hit_target(specs, &mut marks.conditions, &order.states, now);
+        if let Some(modifiers) = out.modifiers {
+            marks.modifiers = modifiers;
+        }
+        reactions = out.reactions;
+    }
+    let pushes: Vec<_> = order
+        .actions
+        .iter()
+        .filter_map(|a| match a {
+            EffectOrder::Apply(Effect::Push { dir, strength }) => Some((*dir, *strength)),
+            _ => None,
+        })
+        .chain(reactions.iter().filter_map(|e| match e {
+            Effect::Push { dir, strength } => Some((*dir, *strength)),
+            _ => None,
+        }))
+        .collect();
+    for (dir, strength) in pushes {
+        push(world, target, dir, strength.get(), ev);
+    }
+}
+
+/// 能力1つを、計画から適用まで直列に完了させる。`Err`
+/// は承認後の予期しない失敗（セッションを中断する）。
+#[allow(clippy::too_many_arguments)]
+fn try_commit_one(
+    world: &mut World,
+    specs: &SpecCatalog,
+    game: &mut ActiveGame,
+    budget: &mut Budget,
+    ev: &AbilityEvent,
+    index: usize,
+    gone: &mut EntityHashSet,
+    next: &mut Vec<AbilityEvent>,
+) -> Result<Committed, String> {
+    // 1. 計画（何も変えない）
+    let Some(unit) = world.get::<Medal>(ev.entity).map(|m| m.0.clone()) else {
+        return Ok(Committed::Rejected);
+    };
+    let occasion = Occasion {
+        happening: ev.happening,
+        partner: ev.partner.is_some(),
+    };
+    let Ok(planned) = plan_ability(&game.session, specs, &unit, index, occasion) else {
+        return Ok(Committed::Rejected);
+    };
+    // 2. 対象の検索と適用前の検証（直前の能力の結果を反映したWorldを検索する）
+    let mut found = Vec::with_capacity(planned.orders.len());
+    for order in &planned.orders {
+        let (medals, enemies) = targets(world, order, ev, gone);
+        // 分割は対象の世代で検証する（世代の上限の個体は分割できない。能力全体を不成立にする）
+        if order.splits() > 0
+            && medals
+                .iter()
+                .any(|&m| world.get::<Medal>(m).is_some_and(|u| !u.0.can_spawn()))
+        {
+            return Ok(Committed::Rejected);
+        }
+        found.push((medals, enemies));
+    }
+    // 対象の要る効果しかなく、
+    // どの指示にも対象がいなければ不成立（単独で成り立つ効果があれば実行する）
+    let lone = planned.gauge > 0
+        || planned.revive.is_some()
+        || planned
+            .orders
+            .iter()
+            .flat_map(|o| &o.actions)
+            .any(|a| {
+                matches!(
+                    a,
+                    EffectOrder::Spawn { .. }
+                        | EffectOrder::Apply(Effect::Zone { .. } | Effect::Consume)
+                )
+            });
+    if !lone && found.iter().all(|(m, e)| m.is_empty() && e.is_empty()) {
+        return Ok(Committed::Rejected);
+    }
+    let counts: Vec<u32> = found
+        .iter()
+        .map(|(m, e)| u32::try_from(m.len() + e.len()).unwrap_or(u32::MAX))
+        .collect();
+    // 3. 承認（鮮度の確認と予算の予約。どちらかが足りなければ何も変えない）
+    let need = need_of(&planned, &counts);
+    let Ok(approved) = approve_ability(&game.session, &unit, planned, budget, need) else {
+        return Ok(Committed::Rejected);
+    };
+    let orders = approved.plan().orders.clone();
+    let source = approved.plan().source.clone();
+    let revive = approved.plan().revive;
+    // 4. Domainの確定（ここから先に失敗し得る検証を残さない）
+    let events = {
+        let mut medal = world
+            .get_mut::<Medal>(ev.entity)
+            .ok_or_else(|| format!("{:?} vanished during an approved ability", ev.entity))?;
+        commit_ability(&mut game.session, specs, &mut medal.0, approved)
+            .map_err(|stale| format!("an approved ability became stale: {stale}"))?
+    };
+    // 5. Worldへの直接反映
+    let now = world.resource::<GameClock>().now();
+    for (order, (medals, enemies)) in orders.iter().zip(found) {
         for action in &order.actions {
             match action {
                 EffectOrder::Apply(effect @ Effect::Zone { mark, radius, duration, .. }) => {
-                    commands.spawn((
+                    world.spawn((
                         ZoneField {
                             effect: effect.clone(),
                             target: order.target,
@@ -708,133 +694,443 @@ pub fn execute_orders(
                             format!("zone/{mark}"),
                             Silhouette::Cylinder { radius: radius.get(), height: ZONE_HEIGHT },
                         ),
-                        Transform::from_translation(placed.at),
+                        Transform::from_translation(ev.at),
                         in_game(),
                     ));
                 },
                 EffectOrder::Spawn { medal, level, count, at, mark, rewarded } => {
-                    // 子は親の世代+1、報酬資格は生成の定義どおり（基本設計 3.18）
-                    let parent = placed
-                        .source
-                        .and_then(|s| medals.get(s).ok())
-                        .map_or_else(
-                            || MedalUnit::new(medal.clone(), *level),
-                            |(_, body, ..)| body.medal.0.clone(),
-                        );
-                    let ActiveGame { session, stage, .. } = &mut *game;
                     for i in 0..count.get() {
-                        let mut unit = parent.offspring(medal.clone(), *level, *rewarded);
+                        let mut child = unit.offspring(medal.clone(), *level, *rewarded);
                         if let Some(def) = mark.as_ref().and_then(|m| specs.abilities().mark(m)) {
-                            unit.conditions_mut().apply(def, None);
+                            child.conditions_mut().apply(def, None);
                         }
                         let offset = Vec3::X * SPAWN_SPACING * f32::from(i);
-                        let position = spawn_point(*at, placed.at, stage) + offset;
-                        spawn_medal(
-                            &mut commands,
-                            session,
-                            &specs,
-                            unit,
-                            position,
-                            Vec3::ZERO,
-                            &[Happening::Entered],
-                            now,
-                            &mut orders,
-                            &mut events,
-                        );
+                        let position = spawn_point(*at, ev.at, &game.stage) + offset;
+                        spawn_child(world, specs, child, position, now, next);
                     }
                 },
                 _ => {},
             }
         }
-        let (medal_targets, enemy_targets) = targets(&placed, &medals, &enemies);
-        for entity in medal_targets {
-            let Ok((entity, mut body, mut forces, mut motion)) = medals.get_mut(entity) else {
+        for target in medals {
+            apply_to_medal(world, specs, budget, order, ev, target, now, gone, next);
+        }
+        for target in enemies {
+            apply_to_enemy(world, specs, order, ev, target, now);
+        }
+    }
+    // 自分を消費する能力（爆弾）:
+    // 効果を適用し終えてから、同じ確定単位で退場する（Consumed。報酬・落下の通知なし）
+    let consumes = orders
+        .iter()
+        .flat_map(|o| &o.actions)
+        .any(|a| matches!(a, EffectOrder::Apply(effect) if effect.consumes_source()));
+    if consumes && !gone.contains(&ev.entity) && world.despawn(ev.entity) {
+        budget.medal_left();
+        gone.insert(ev.entity);
+    }
+    // 6. 通知（完了した効果だけ）
+    for event in events {
+        world.write_message(DomainEventMsg(event));
+    }
+    world.write_message(AbilityCue {
+        medal: source.medal,
+        index: source.index,
+        at: ev.at,
+    });
+    Ok(Committed::Applied { revive })
+}
+
+/// 出来事の能力を順に確定する。進行できなくなったら（満タン・終局）残りを確定しない。
+#[allow(clippy::too_many_arguments)]
+fn resolve_events(
+    world: &mut World,
+    specs: &SpecCatalog,
+    game: &mut ActiveGame,
+    budget: &mut Budget,
+    events: &[AbilityEvent],
+    gone: &mut EntityHashSet,
+    next: &mut Vec<AbilityEvent>,
+) -> Result<(), String> {
+    for ev in events {
+        if gone.contains(&ev.entity) {
+            continue;
+        }
+        let Some(unit) = world.get::<Medal>(ev.entity).map(|m| m.0.clone()) else {
+            continue;
+        };
+        let indices: Vec<usize> = triggered(specs, &unit, ev.happening).collect();
+        for index in indices {
+            if game.session.ensure_running().is_err() {
+                return Ok(());
+            }
+            try_commit_one(world, specs, game, budget, ev, index, gone, next)?;
+        }
+    }
+    Ok(())
+}
+
+/// 排他的Systemの共通の入口: Specs・ActiveGame・予算を借りて `body`
+/// を実行し、失敗したら中断を記録する。
+fn with_session(
+    world: &mut World,
+    body: impl FnOnce(&mut World, &SpecCatalog, &mut ActiveGame, &mut Budget) -> Result<(), String>,
+) {
+    let result = world.resource_scope(|world, specs: Mut<Specs>| {
+        world.resource_scope(|world, mut game: Mut<ActiveGame>| {
+            world.resource_scope(|world, mut budget: Mut<AbilityBudget>| {
+                body(world, &specs, &mut game, &mut budget)
+            })
+        })
+    });
+    if let Err(reason) = result {
+        error!(%reason, "aborting the session after an unexpected ability failure");
+        world.resource_mut::<SessionAbort>().0 = Some(reason);
+    }
+}
+
+// ── 落下（Resolve。排他的System） ─────────────────────────
+
+/// 落ちたメダル: 自分が落ちた能力（復活なら盤面へ戻す）を判定してから退場を確定し、
+/// 報酬資格のある落下だけの価値をゲージの事実にする。復活しなかった個体ごとに `OtherFell`
+/// を通知する。 必須の退場・報酬は予算や満タンで延期しない（基本設計 3.18）。
+pub fn resolve_falls(world: &mut World) {
+    let mut falling: Vec<Entity> = world
+        .resource_mut::<FallenMedals>()
+        .0
+        .drain()
+        .collect();
+    if falling.is_empty() {
+        return;
+    }
+    falling.sort_unstable();
+    with_session(world, |world, specs, game, budget| {
+        let book = specs.abilities();
+        let (mut value, mut fell) = (0.0, 0usize);
+        let mut gone = EntityHashSet::default();
+        let mut next = Vec::new();
+        for entity in falling {
+            let Some((unit, at)) = world
+                .get::<Medal>(entity)
+                .map(|m| m.0.clone())
+                .zip(world.get::<Position>(entity).map(|p| p.0))
+            else {
                 continue;
             };
-            let mut reactions = Vec::new();
-            if !order.states.is_empty() {
-                let out = hit_target(&specs, body.medal.0.conditions_mut(), &order.states, now);
-                if out.modifiers.is_some() {
-                    body.refresh(&specs, &mut commands);
+            let ev = AbilityEvent {
+                entity,
+                happening: Happening::SelfFell,
+                at,
+                forward: Vec3::NEG_Z,
+                partner: None,
+            };
+            let mut revive = None;
+            for index in triggered(specs, &unit, Happening::SelfFell).collect::<Vec<_>>() {
+                if let Committed::Applied { revive: Some(to) } =
+                    try_commit_one(world, specs, game, budget, &ev, index, &mut gone, &mut next)?
+                {
+                    revive = Some(to);
                 }
-                reactions = out.reactions;
             }
-            let position = forces.position();
-            let actions = order
-                .actions
-                .iter()
-                .cloned()
-                .chain(reactions.into_iter().map(EffectOrder::Apply));
-            for action in actions {
-                match action {
-                    EffectOrder::Apply(Effect::Push { dir, strength }) => {
-                        forces.apply_linear_impulse(
-                            push_direction(dir, placed.at, placed.forward, position)
-                                * strength.get(),
-                        );
-                        if (Effect::Push { dir, strength }).lifts() {
-                            motion.0.lift();
-                            commands.entity(entity).insert(CollisionEventsEnabled);
-                        }
-                    },
-                    EffectOrder::Apply(Effect::Remove) => commands.entity(entity).try_despawn(),
-                    EffectOrder::Apply(Effect::Split) => {
-                        // 分割も同じ系譜・報酬の制限を通す（素の複製で迂回しない）
-                        let unit = body.medal.0.split_off();
-                        if let Some(spec) = specs.medal(unit.medal(), unit.level()) {
-                            let modifiers = unit.modifiers(specs.abilities());
-                            commands.spawn(medal_bundle(
-                                unit,
-                                spec,
-                                &modifiers,
-                                Transform::from_translation(position + Vec3::Y * 0.2),
-                                motion.0,
-                            ));
-                        }
-                    },
-                    EffectOrder::Transform { medal, level } => {
-                        body.medal.0.transform(medal, level);
-                        body.refresh(&specs, &mut commands);
-                        resubscribe(&mut commands, entity, &specs, &body.medal.0, motion.0.state());
-                    },
-                    _ => {},
-                }
+            match revive {
+                Some(to) => {
+                    // 位置・描画用Transform・
+                    // 速度をそろえて戻す（Avianが古いTransformから位置を戻さないように）
+                    let to = spawn_point(to, at, &game.stage);
+                    world.entity_mut(entity).insert((
+                        Position(to),
+                        Transform::from_translation(to),
+                        LinearVelocity::ZERO,
+                        CollisionEventsEnabled,
+                    ));
+                    if let Some(mut motion) = world.get_mut::<MedalMotionState>(entity) {
+                        motion.0.lift();
+                    }
+                },
+                None => {
+                    value += world
+                        .get::<Medal>(entity)
+                        .map_or(0.0, |m| m.0.exit_reward(MedalExitReason::FellIntoAbyss, book));
+                    world.despawn(entity);
+                    budget.medal_left();
+                    gone.insert(entity);
+                    fell += 1;
+                },
             }
         }
-        for entity in enemy_targets {
-            let Ok((_, mut marks, mut forces)) = enemies.get_mut(entity) else {
+        if value > 0.0 {
+            world
+                .resource_mut::<PendingFacts>()
+                .0
+                .push(PhysicsFact::MedalsFell(value));
+        }
+        notify_other_fell(world, specs, game, budget, fell, &mut gone, &mut next)?;
+        world.resource_mut::<NextTickEvents>().0.extend(next);
+        Ok(())
+    });
+}
+
+/// 敵の撃破が確定した数だけ、`OtherFell` を通知する（基本設計 4.3）。
+pub fn enemy_falls(world: &mut World) {
+    let times = std::mem::take(&mut world.resource_mut::<DefeatedEnemies>().0);
+    if times == 0 {
+        return;
+    }
+    with_session(world, |world, specs, game, budget| {
+        let (mut gone, mut next) = (EntityHashSet::default(), Vec::new());
+        notify_other_fell(world, specs, game, budget, times, &mut gone, &mut next)?;
+        world.resource_mut::<NextTickEvents>().0.extend(next);
+        Ok(())
+    });
+}
+
+/// 退場した件数×購読能力を遅延列挙し、検査枠を1消費してから確定へ進める（基本設計 3.18）。
+/// 購読者は通知を始める時点のスナップショット（Entity・能力番号順）。上限・
+/// 満タンで残りを列挙しない。
+#[allow(clippy::too_many_arguments)]
+fn notify_other_fell(
+    world: &mut World,
+    specs: &SpecCatalog,
+    game: &mut ActiveGame,
+    budget: &mut Budget,
+    times: usize,
+    gone: &mut EntityHashSet,
+    next: &mut Vec<AbilityEvent>,
+) -> Result<(), String> {
+    if times == 0 {
+        return Ok(());
+    }
+    let book = specs.abilities();
+    let mut q = world.query::<(Entity, &Medal, &Position, &LinearVelocity)>();
+    let mut subscribers: Vec<(Entity, usize, Vec3, Vec3)> = q
+        .iter(world)
+        .filter(|(e, ..)| !gone.contains(e))
+        .flat_map(|(e, m, p, v)| {
+            book.triggered(m.0.medal(), m.0.level(), Happening::OtherFell)
+                .map(move |(i, _)| (e, i, p.0, forward(v.0)))
+        })
+        .collect();
+    subscribers.sort_unstable_by_key(|(e, i, ..)| (*e, *i));
+    for _ in 0..times {
+        for &(entity, index, at, forward) in &subscribers {
+            if game.session.ensure_running().is_err() || !budget.check_other_fell() {
+                return Ok(());
+            }
+            if gone.contains(&entity) {
+                continue;
+            }
+            let ev = AbilityEvent {
+                entity,
+                happening: Happening::OtherFell,
+                at,
+                forward,
+                partner: None,
+            };
+            try_commit_one(world, specs, game, budget, &ev, index, gone, next)?;
+        }
+    }
+    Ok(())
+}
+
+// ── 支えの接触による着地の判定（基本設計 5.4、P1-5） ─────────
+
+/// 支えのしきい値【仮決定】: 法線の上向き成分・接触の隙間（m）・離れる速さ（m/s）。
+const SUPPORT_MIN_UP: f32 = 0.5;
+const SUPPORT_MAX_GAP: f32 = 0.002;
+const SUPPORT_MAX_SEPARATION: f32 = 0.2;
+
+/// 相手から自分へ向かう法線 `normal`、接触点 `point`、自分の中心 `center`、めり込み
+/// `penetration`（負は隙間）、 法線方向に離れていく相対速度 `separation`
+/// の接触が、自分を下から支えているか。 壁・天井・遠い投機的な接触・跳ね上がり中は支えにしない。
+fn supports(normal: Vec3, point: Vec3, center: Vec3, penetration: f32, separation: f32) -> bool {
+    normal.dot(Vec3::Y) >= SUPPORT_MIN_UP
+        && point.y < center.y
+        && penetration >= -SUPPORT_MAX_GAP
+        && separation <= SUPPORT_MAX_SEPARATION
+}
+
+/// 飛行中のメダルだけを調べ、継続中の接触から支えを見つける（接触開始を逃しても着地できる）。
+pub fn observe_support(
+    collisions: Collisions,
+    medals: Query<(Entity, &Position, &LinearVelocity, &MedalMotionState), With<Medal>>,
+    velocities: Query<&LinearVelocity>,
+    sensors: Query<(), With<Sensor>>,
+    mut touching: ResMut<Touching>,
+) {
+    touching.0.clear();
+    for (entity, position, velocity, motion) in &medals {
+        if motion.0.state() != Motion::Flying {
+            continue;
+        }
+        let supported = collisions.collisions_with(entity).any(|pair| {
+            let (other, sign) = if pair.collider1 == entity {
+                (pair.collider2, -1.0)
+            } else {
+                (pair.collider1, 1.0)
+            };
+            if sensors.contains(other) {
+                return false;
+            }
+            let other_velocity = velocities.get(other).map_or(Vec3::ZERO, |v| v.0);
+            pair.manifolds.iter().any(|m| {
+                let normal = m.normal * sign;
+                let separation = (velocity.0 - other_velocity).dot(normal);
+                m.points
+                    .iter()
+                    .any(|p| supports(normal, p.point, position.0, p.penetration, separation))
+            })
+        });
+        if supported {
+            touching.0.insert(entity);
+        }
+    }
+}
+// ── 出来事の収集（Abilities。通常のSystem） ────────────────
+
+/// 衝突: メダル・敵とぶつかった出来事（接触開始）。
+/// 着地の判定は支えの接触で別に行う（[`observe_support`]）。 同じ接触開始のペアはtick内で1回だけ。
+/// 両側をそれぞれ判定する。
+pub fn collisions(
+    mut collisions: MessageReader<CollisionStart>,
+    medals: Query<(&Position, &LinearVelocity), With<Medal>>,
+    enemies: Query<(), With<Enemy>>,
+    mut events: ResMut<AbilityEvents>,
+    mut seen: Local<HashSet<(Entity, Entity)>>,
+) {
+    seen.clear();
+    for c in collisions.read() {
+        let pair = if c.collider1 < c.collider2 {
+            (c.collider1, c.collider2)
+        } else {
+            (c.collider2, c.collider1)
+        };
+        if !seen.insert(pair) {
+            continue;
+        }
+        for (me, other) in [(c.collider1, c.collider2), (c.collider2, c.collider1)] {
+            let Ok((position, velocity)) = medals.get(me) else {
                 continue;
             };
-            let mut reactions = Vec::new();
-            if !order.states.is_empty() {
-                let out = hit_target(&specs, &mut marks.conditions, &order.states, now);
-                if let Some(modifiers) = out.modifiers {
-                    marks.modifiers = modifiers;
-                }
-                reactions = out.reactions;
-            }
-            let position = forces.position();
-            let pushes = order
-                .actions
-                .iter()
-                .filter_map(|a| match a {
-                    EffectOrder::Apply(Effect::Push { dir, strength }) => Some((*dir, *strength)),
-                    _ => None,
-                })
-                .chain(reactions.iter().filter_map(|e| match e {
-                    Effect::Push { dir, strength } => Some((*dir, *strength)),
-                    _ => None,
-                }));
-            for (dir, strength) in pushes {
-                forces.apply_linear_impulse(
-                    push_direction(dir, placed.at, placed.forward, position) * strength.get(),
-                );
-            }
+            let partner = if enemies.contains(other) {
+                Partner::Enemy
+            } else if medals.contains(other) {
+                Partner::Medal
+            } else {
+                continue;
+            };
+            events.0.push(AbilityEvent {
+                entity: me,
+                happening: Happening::Collided(partner),
+                at: position.0,
+                forward: forward(velocity.0),
+                partner: Some(other),
+            });
         }
     }
 }
 
-/// 場: 期限が来たら消し、中にいる対象へ印を付ける。
+/// 挙動ステータスの観測（数千枚を並列に）。状態が変わったメダルの出来事を積む。
+pub fn observe_motion(
+    mut medals: Query<(Entity, &mut MedalMotionState, &LinearVelocity, &Position)>,
+    touching: Res<Touching>,
+    clock: Res<GameClock>,
+    mut changed: Local<Parallel<Vec<AbilityEvent>>>,
+    mut events: ResMut<AbilityEvents>,
+) {
+    let now = clock.now();
+    let rules = MotionRules::default();
+    medals
+        .par_iter_mut()
+        .for_each(|(entity, mut motion, velocity, position)| {
+            let sample = MotionSample {
+                speed: velocity.length(),
+                grounded: touching.0.contains(&entity),
+            };
+            // 状態が変わらない大多数のメダルで変更を立てないよう、写しで観測する
+            let mut next = motion.0;
+            if let Some(event) = next.observe(sample, now, &rules) {
+                motion.0 = next;
+                changed.scope(|v| {
+                    v.push(AbilityEvent {
+                        entity,
+                        happening: Happening::Motion(event),
+                        at: position.0,
+                        forward: forward(velocity.0),
+                        partner: None,
+                    });
+                });
+            } else if next != motion.0 {
+                motion.bypass_change_detection().0 = next;
+            }
+        });
+    events.0.extend(changed.drain());
+}
+
+/// 時限・間隔の能力の期限。発動の成否にかかわらず、周期は次の本来の期限へ進め、時限は消化済みにする
+/// （棄却された出来事を再試行しない。基本設計 3.18）。
+pub fn run_timers(
+    mut medals: Query<(Entity, &mut AbilityTimers, &Position, &LinearVelocity)>,
+    clock: Res<GameClock>,
+    mut events: ResMut<AbilityEvents>,
+) {
+    let now = clock.now();
+    for (entity, mut timers, position, velocity) in &mut medals {
+        if !timers.0.iter().any(|d| d.at <= now) {
+            continue;
+        }
+        for due in timers.0.iter_mut().filter(|d| d.at <= now) {
+            events.0.push(AbilityEvent {
+                entity,
+                happening: Happening::Due(due.index),
+                at: position.0,
+                forward: forward(velocity.0),
+                partner: None,
+            });
+            if let Some(every) = due.every {
+                due.at = now + every;
+            }
+        }
+        timers.0.retain(|d| d.at > now);
+    }
+}
+
+// ── 確定（Abilities。排他的System） ───────────────────────
+
+/// このtickの出来事と、前のtickから回した子の `Entered` を、順序を固定して確定する。
+pub fn resolve_abilities(world: &mut World) {
+    let mut events = std::mem::take(&mut world.resource_mut::<AbilityEvents>().0);
+    let queued = std::mem::take(&mut world.resource_mut::<NextTickEvents>().0);
+    if events.is_empty() && queued.is_empty() {
+        return;
+    }
+    let dequeued = u32::try_from(queued.len()).unwrap_or(u32::MAX);
+    events.extend(queued);
+    events.sort_by_key(AbilityEvent::order_key);
+    with_session(world, |world, specs, game, budget| {
+        budget.dequeued(dequeued);
+        let (mut gone, mut next) = (EntityHashSet::default(), Vec::new());
+        resolve_events(world, specs, game, budget, &events, &mut gone, &mut next)?;
+        if game.session.ensure_running().is_err() {
+            // 満タン・終局: 未確定の出来事と待ち行列を持ち越さない（基本設計 3.16）
+            budget.dequeued(u32::try_from(next.len()).unwrap_or(u32::MAX));
+        } else {
+            world.resource_mut::<NextTickEvents>().0.extend(next);
+        }
+        Ok(())
+    });
+}
+
+/// tickの始め: 予算のtickごとの枠を戻す。
+pub fn begin_tick(mut budget: ResMut<AbilityBudget>) {
+    budget.next_tick();
+}
+
+/// 敵の印と位置（場の対象の検索）。
+type EnemyPositions<'w, 's> =
+    Query<'w, 's, (&'static mut EnemyMarks, &'static Position), (With<Enemy>, Without<Medal>)>;
+
+/// 場: 期限が来たら消し、中にいる対象へ印を付ける。各tickの場1つを適用単位とし、
+/// 枠不足ならそのtickは省略する。
 #[allow(clippy::too_many_arguments)]
 pub fn zones(
     fields: Query<(Entity, &ZoneField, &Transform)>,
@@ -842,17 +1138,36 @@ pub fn zones(
     mut enemies: EnemyPositions,
     specs: Res<Specs>,
     clock: Res<GameClock>,
+    mut budget: ResMut<AbilityBudget>,
     mut commands: Commands,
 ) {
     let now = clock.now();
     for (entity, field, transform) in &fields {
         if now >= field.until {
             commands.entity(entity).try_despawn();
+            budget.zone_ended();
             continue;
         }
         let inside =
             |p: &Position| p.distance_squared(transform.translation) <= field.radius * field.radius;
-        if matches!(field.target, Target::Medals | Target::Both) {
+        let wants_medals = matches!(field.target, Target::Medals | Target::Both);
+        let wants_enemies = matches!(field.target, Target::Enemies | Target::Both);
+        let count = medals
+            .iter()
+            .filter(|(_, p)| wants_medals && inside(p))
+            .count()
+            + enemies
+                .iter()
+                .filter(|(_, p)| wants_enemies && inside(p))
+                .count();
+        if count == 0
+            || budget
+                .reserve_effects(u32::try_from(count).unwrap_or(u32::MAX))
+                .is_err()
+        {
+            continue;
+        }
+        if wants_medals {
             for (mut body, position) in &mut medals {
                 if inside(position)
                     && stand_in_zone(&specs, body.medal.0.conditions_mut(), &field.effect, now)
@@ -863,7 +1178,7 @@ pub fn zones(
                 }
             }
         }
-        if matches!(field.target, Target::Enemies | Target::Both) {
+        if wants_enemies {
             for (mut marks, position) in &mut enemies {
                 if inside(position)
                     && let Some(modifiers) =
@@ -877,11 +1192,13 @@ pub fn zones(
 }
 
 /// 印の期限。持ち主が消える印（焼き尽くす・毒）なら消す（能力による消滅で、報酬なし）。
+/// 予算で延期しない。
 pub fn expire(
     mut medals: Query<(Entity, MedalBodyData), Without<Enemy>>,
     mut enemies: Query<&mut EnemyMarks, (With<Enemy>, Without<Medal>)>,
     specs: Res<Specs>,
     clock: Res<GameClock>,
+    mut budget: ResMut<AbilityBudget>,
     mut commands: Commands,
 ) {
     let now = clock.now();
@@ -890,10 +1207,9 @@ pub fn expire(
             continue;
         }
         let out = expire_marks(&specs, body.medal.0.conditions_mut(), now);
-        // 期限で消える印は能力による消滅（DestroyedByAbility）。通常の報酬は出さない（基本設計
-        // 3.18）
         if out.vanish {
             commands.entity(entity).try_despawn();
+            budget.medal_left();
         } else if out.modifiers.is_some() {
             body.refresh(&specs, &mut commands);
         }
@@ -908,13 +1224,14 @@ pub fn expire(
     }
 }
 
-/// 敵の歩行に印の効き目を掛ける（速さ・進路のずれ）。
-pub fn enemy_walk(modifiers: Option<&EnemyMarks>) -> Modifiers {
-    modifiers.map_or(Modifiers::NONE, |m| m.modifiers)
+/// 敵の歩行に掛ける印の効き目（速さ・進路のずれ）。
+pub fn enemy_walk(marks: Option<&EnemyMarks>) -> domain::mark::Modifiers {
+    marks.map_or(domain::mark::Modifiers::NONE, |m| m.modifiers)
 }
 
 #[cfg(test)]
 mod tests {
+    use domain::motion::MotionEvent;
     use rstest::rstest;
 
     use super::*;
@@ -942,5 +1259,91 @@ mod tests {
         #[case] expected: Vec3,
     ) {
         assert_eq!(spawn_point(at, here, &stage()), expected);
+    }
+
+    fn due(index: usize, at: u64, every: Option<u64>) -> (usize, Tick, Option<Ticks>) {
+        (index, Tick(at), every.map(Ticks))
+    }
+
+    fn dues(timers: &AbilityTimers) -> Vec<(usize, Tick, Option<Ticks>)> {
+        timers
+            .0
+            .iter()
+            .map(|d| (d.index, d.at, d.every))
+            .collect()
+    }
+
+    /// 能力0（周期）は次回期限100のまま、能力1（時限）は処理済みで戻さず、
+    /// 覚醒の能力2だけを今から足す。
+    #[rstest]
+    fn evolving_keeps_existing_timers_and_adds_only_awakened_ones() {
+        let mut timers =
+            AbilityTimers(vec![Due { index: 0, at: Tick(100), every: Some(Ticks(30)) }]);
+        let level_four = [
+            (0, Ticks(30), Some(Ticks(30))),
+            (1, Ticks(90), None),
+            (2, Ticks(60), None),
+        ];
+        timers.upgrade(2, level_four, Tick(70));
+        assert_eq!(dues(&timers), [due(0, 100, Some(30)), due(2, 130, None)]);
+        timers.upgrade(3, level_four, Tick(80));
+        assert_eq!(dues(&timers).len(), 2, "reapplying the same level adds nothing");
+    }
+
+    #[rstest]
+    #[case::floor(Vec3::Y, Vec3::new(0.0, -0.04, 0.0), 0.0, 0.0, true)]
+    #[case::gentle_slope(Vec3::new(0.7, 0.71, 0.0), Vec3::new(0.0, -0.04, 0.0), 0.0, 0.0, true)]
+    #[case::wall(Vec3::X, Vec3::new(-0.28, 0.0, 0.0), 0.0, 0.0, false)]
+    #[case::ceiling(Vec3::NEG_Y, Vec3::new(0.0, 0.04, 0.0), 0.0, 0.0, false)]
+    #[case::point_above_the_center(Vec3::Y, Vec3::new(0.0, 0.01, 0.0), 0.0, 0.0, false)]
+    #[case::speculative_gap(Vec3::Y, Vec3::new(0.0, -0.04, 0.0), -0.01, 0.0, false)]
+    #[case::small_gap(Vec3::Y, Vec3::new(0.0, -0.04, 0.0), -0.001, 0.0, true)]
+    #[case::bouncing_up(Vec3::Y, Vec3::new(0.0, -0.04, 0.0), 0.0, 1.0, false)]
+    #[case::settling(Vec3::Y, Vec3::new(0.0, -0.04, 0.0), 0.0, 0.1, true)]
+    fn only_contacts_from_below_support_a_medal(
+        #[case] normal: Vec3,
+        #[case] point: Vec3,
+        #[case] penetration: f32,
+        #[case] separation: f32,
+        #[case] supported: bool,
+    ) {
+        assert_eq!(
+            supports(normal, point, Vec3::ZERO, penetration, separation),
+            supported
+        );
+    }
+    fn ev(world: &mut World, happening: Happening) -> AbilityEvent {
+        AbilityEvent {
+            entity: world.spawn_empty().id(),
+            happening,
+            at: Vec3::ZERO,
+            forward: Vec3::NEG_Z,
+            partner: None,
+        }
+    }
+
+    /// 収集の順序に依存せず、種類順（盤面に出た → 射出 → 衝突 → 挙動 → 時限）→ Entity順に確定する。
+    #[rstest]
+    fn events_are_resolved_in_a_fixed_order() {
+        let mut world = World::new();
+        let [a, b, c, d, e, f] = [
+            Happening::Entered,
+            Happening::Launched,
+            Happening::Collided(Partner::Enemy),
+            Happening::Collided(Partner::Medal),
+            Happening::Motion(MotionEvent::Landed),
+            Happening::Due(0),
+        ]
+        .map(|h| ev(&mut world, h));
+        let sorted = |mut events: Vec<AbilityEvent>| {
+            events.sort_by_key(AbilityEvent::order_key);
+            events
+        };
+        let one = sorted(vec![f, e, d, c, b, a]);
+        assert_eq!(one, sorted(vec![c, a, f, d, b, e]), "the input order does not matter");
+        let kinds: Vec<_> = one.iter().map(|ev| ev.order_key().0).collect();
+        assert_eq!(kinds, [0, 1, 2, 2, 3, 4]);
+        let collisions = [one[2].entity, one[3].entity];
+        assert!(collisions[0] < collisions[1], "same kind: by entity");
     }
 }

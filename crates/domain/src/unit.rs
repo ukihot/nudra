@@ -16,6 +16,9 @@ use crate::{
 /// とは別に、再生・変化でも共通の上限）。
 pub const MAX_REVIVES: u8 = 1;
 
+/// 生成できる最大の世代【仮決定】（試作では1。世代1の個体は生成・分割できない。基本設計 3.18）。
+pub const MAX_GENERATION: u8 = 1;
+
 /// メダルが盤面から退場した原因（基本設計 3.18）。通常の進化報酬は奈落への落下だけ。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MedalExitReason {
@@ -84,6 +87,11 @@ impl MedalUnit {
 
     pub fn lineage(&self) -> Lineage {
         self.lineage
+    }
+
+    /// この個体が生成・分割できるか（世代の上限 [`MAX_GENERATION`]）。
+    pub fn can_spawn(&self) -> bool {
+        self.lineage.generation < MAX_GENERATION
     }
 
     /// まだ復活できるか（個体通算の上限 [`MAX_REVIVES`]）。
@@ -235,6 +243,14 @@ mod tests {
         assert_eq!(half.conditions(), parent.conditions());
     }
 
+    #[rstest]
+    fn only_the_first_generation_can_spawn() {
+        let parent = unit();
+        assert!(parent.can_spawn());
+        let child = parent.offspring(MedalCode::new("water"), lv(1), false);
+        assert!(!child.can_spawn(), "generation {MAX_GENERATION} cannot spawn");
+        assert!(!parent.split_off().can_spawn());
+    }
     #[rstest]
     fn generations_saturate_instead_of_overflowing() {
         let mut u = unit();

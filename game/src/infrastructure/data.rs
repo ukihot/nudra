@@ -371,6 +371,8 @@ enum EffectDto {
     Gauge(u32),
     Revive(SpawnAtDto),
     Replay,
+    /// 発動したメダル自身を消費する（爆弾の自爆）
+    Consume,
 }
 
 fn ticks(ms: u64) -> Ticks {
@@ -432,6 +434,7 @@ impl EffectDto {
             Self::Gauge(points) => Effect::Gauge { points: *points },
             Self::Revive(at) => Effect::Revive { at: (*at).into() },
             Self::Replay => Effect::Replay,
+            Self::Consume => Effect::Consume,
         })
     }
 }

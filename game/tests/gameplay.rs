@@ -45,17 +45,20 @@ const ABYSS: Vec3 = Vec3::new(0.0, -10.0, 0.0);
 struct Recorded {
     events: Vec<DomainEvent>,
     outcomes: Vec<RequestOutcome>,
+    cues: Vec<game::port::AbilityCue>,
 }
 
 fn record(
     mut events: MessageReader<DomainEventMsg>,
     mut outcomes: MessageReader<RequestOutcome>,
+    mut cues: MessageReader<game::port::AbilityCue>,
     mut recorded: ResMut<Recorded>,
 ) {
     recorded
         .events
         .extend(events.read().map(|m| m.0.clone()));
     recorded.outcomes.extend(outcomes.read().cloned());
+    recorded.cues.extend(cues.read().cloned());
 }
 
 /// テストの間だけ存在するセーブ先。Appと一緒に破棄される。
@@ -983,7 +986,7 @@ mod abilities {
     };
     use game::{
         infrastructure::{
-            abilities::{self, PendingOrders, ZoneField},
+            abilities::{self, AbilityBudget, AbilityEvents, SessionAbort, ZoneField},
             data::Specs,
         },
         port::{Appearance, MedalMotionState},
@@ -996,22 +999,18 @@ mod abilities {
         app.world_mut()
             .run_system_once(
                 move |mut commands: Commands,
-                      mut game: ResMut<ActiveGame>,
                       specs: Res<Specs>,
                       clock: Res<GameClock>,
-                      mut orders: ResMut<PendingOrders>,
-                      mut events: MessageWriter<DomainEventMsg>| {
+                      mut events: ResMut<AbilityEvents>| {
                     let unit = MedalUnit::new(code.clone(), MedalLevel::new(level).expect("level"));
                     abilities::spawn_medal(
                         &mut commands,
-                        &mut game.session,
                         &specs,
                         unit,
                         at,
                         Vec3::ZERO,
                         &[Happening::Entered],
                         clock.now(),
-                        &mut orders,
                         &mut events,
                     )
                 },
@@ -1215,6 +1214,126 @@ mod abilities {
         assert_eq!(mass(&app, blood), base * 1.5);
     }
 
+    fn limit(app: &mut App, edit: impl FnOnce(&mut application::BudgetLimits)) {
+        let live = app.world().resource::<AbilityBudget>().live_medals();
+        let mut limits = application::BudgetLimits::default();
+        edit(&mut limits);
+        let budget = application::Budget::new(limits, live).expect("the board fits");
+        app.world_mut().insert_resource(AbilityBudget(budget));
+    }
+
+    /// 幻: 生成の枠が無ければ、静止しても能力全体を棄却する（子は生まれない）。
+    #[test]
+    fn an_ability_without_spawn_budget_is_rejected_whole() {
+        let mut app = started();
+        limit(&mut app, |l| l.spawns = 0);
+        let at = above_the_pile(&mut app);
+        let illusion = spawn(&mut app, "illusion", 1, at);
+        let before = count::<Medal>(&mut app);
+        run_until(&mut app, 900, |a| motion(a, illusion) == Some(Motion::Resting));
+        app.update();
+        assert_eq!(count::<Medal>(&mut app), before, "no child without a spawn budget");
+    }
+
+    /// 盤面が満杯なら射出しない（射出の出来事も出ず、クールダウンも始まらない）。
+    #[test]
+    fn a_full_board_refuses_to_launch() {
+        let mut app = started();
+        limit(&mut app, |_| {});
+        let live = app.world().resource::<AbilityBudget>().live_medals();
+        limit(&mut app, |l| l.live_medals = live);
+        set_fire(&mut app, true);
+        for _ in 0..30 {
+            app.update();
+        }
+        assert_eq!(launches(&app), 0);
+    }
+
+    /// 承認後の予期しない失敗（中断の記録）: 勝敗を確定せず、結果を作らずに選択画面へ戻る。
+    #[test]
+    fn an_aborted_session_returns_to_select_without_a_result() {
+        let mut app = started();
+        app.world_mut().resource_mut::<SessionAbort>().0 = Some("injected".into());
+        run_until(&mut app, 5, |a| app_state(a) == AppState::CharacterSelect);
+        assert!(app.world().get_resource::<GameResult>().is_none());
+        assert!(!lost(&app));
+    }
+
+    fn cues(app: &App, medal: &str) -> usize {
+        recorded(app)
+            .cues
+            .iter()
+            .filter(|c| c.medal.as_str() == medal)
+            .count()
+    }
+
+    /// 爆弾: 3秒後に周りを押し出し、自分は同じ確定で消費される（報酬なし）。演出の通知は1回。
+    #[test]
+    fn a_bomb_blasts_and_consumes_itself_without_reward() {
+        let mut app = started();
+        let at = above_the_pile(&mut app);
+        let bomb = spawn(&mut app, "bomb", 1, at);
+        run_until(&mut app, 240, |a| a.world().get_entity(bomb).is_err());
+        let fastest = app
+            .world_mut()
+            .query_filtered::<&LinearVelocity, With<Medal>>()
+            .iter(app.world())
+            .map(|v| v.length())
+            .fold(0.0, f32::max);
+        assert!(fastest > 1.0, "the blast pushed the pile: {fastest}");
+        assert_eq!(cues(&app, "bomb"), 1);
+        assert_eq!(gauge(&app), 0.0, "a consumed medal is not rewarded");
+    }
+
+    /// 水分身: 着地で分身を1枚。分身は世代1なので、着地しても増えない。
+    #[test]
+    fn a_water_clone_spawns_only_one_generation() {
+        let mut app = started();
+        let at = above_the_pile(&mut app);
+        let before = count::<Medal>(&mut app);
+        spawn(&mut app, "water_clone", 1, at);
+        run_until(&mut app, 300, |a| count::<Medal>(a) == before + 2);
+        for _ in 0..300 {
+            app.update();
+        }
+        assert_eq!(count::<Medal>(&mut app), before + 2, "the clone cannot clone again");
+        assert_eq!(cues(&app, "water_clone"), 1);
+    }
+
+    /// 雷: 2秒ごとに放電する（止まっていても、範囲に相手がいれば）。
+    #[test]
+    fn lightning_discharges_periodically() {
+        let mut app = started();
+        let at = above_the_pile(&mut app);
+        spawn(&mut app, "lightning", 1, at);
+        run_until(&mut app, 260, |a| cues(a, "lightning") >= 2);
+    }
+
+    /// 6種（水・周期の雷・時限の爆弾・水分身・ゾンビ・デジャヴ）を同じ盤面で同時に動かす。
+    /// 実行時エラーなし（Fallbackはpanic）、複数の種類が発動し、生存数は上限内。
+    #[test]
+    fn the_six_prototypes_run_together_on_one_board() {
+        let mut app = started();
+        let at = above_the_pile(&mut app);
+        let six = ["water", "lightning", "bomb", "water_clone", "zombie", "deja_vu"];
+        for (i, code) in six.iter().enumerate() {
+            #[allow(clippy::cast_precision_loss)]
+            let offset = Vec3::new((i as f32 - 2.5) * 0.4, 0.3 * i as f32, 0.0);
+            spawn(&mut app, code, 1, at + offset);
+        }
+        for _ in 0..360 {
+            app.update();
+        }
+        let fired: std::collections::HashSet<&str> = recorded(&app)
+            .cues
+            .iter()
+            .map(|c| c.medal.as_str())
+            .collect();
+        assert!(fired.len() >= 3, "several kinds fired: {fired:?}");
+        assert!(fired.contains("bomb") && fired.contains("lightning"), "{fired:?}");
+        let live = app.world().resource::<AbilityBudget>().live_medals();
+        assert!(live <= application::BudgetLimits::default().live_medals);
+    }
     /// 星: 落ちたら（自分が落ちた能力）ゲージ+5。落下そのものの価値1.0 × Easy 4点と合わせて9点。
     #[test]
     fn a_fall_ability_adds_points_with_the_fall() {

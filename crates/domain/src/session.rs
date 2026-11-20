@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 
 use crate::{
-    ability::{AbilityRef, Effect, FiredAbility},
+    ability::AbilityRef,
     difficulty::Difficulty,
     event::DomainEvent,
     evolution::{Evolution, EvolutionChoice, EvolutionError, EvolutionGauge, MedalCollection},
@@ -325,8 +325,7 @@ impl GameSession {
 
     /// 素材メダルから1つ（セッションの乱数。同じシードなら同じ順に選ぶ）。生成・変化の効果に使う。
     pub fn random_element(&mut self, specs: &SpecCatalog) -> Option<MedalCode> {
-        let i = self.rng.pick(specs.elements().count())?;
-        specs.elements().nth(i).cloned()
+        pick_element(&mut self.rng, specs)
     }
 
     /// 進化先が尽きたらゲージを溜めず、選べない進化画面による停止を防ぐ。
@@ -390,28 +389,24 @@ impl GameSession {
         Ok(DomainEvent::Evolved { medal: evolved.medal, level: evolved.level })
     }
 
-    /// 能力の発動。実行する能力を返し、盤面で直前に発動した能力として記録する。
-    /// 再生（[`Effect::Replay`]）を含む能力は記録せず、直前の能力を `replayed` に入れて返す。
-    /// 進行できない間（終了後・進化の選択中）と、定義に無い能力は `None`（何も記録しない）。
-    pub fn fire_ability<'a>(
-        &mut self,
-        fired: &AbilityRef,
-        specs: &'a SpecCatalog,
-    ) -> Option<FiredAbility<'a>> {
-        self.ensure_running().ok()?;
-        let book = specs.abilities();
-        let ability = book
-            .abilities(&fired.medal, fired.level)
-            .get(fired.index)?;
-        if ability.effects.contains(&Effect::Replay) {
-            let replayed = self
-                .last_ability
-                .as_ref()
-                .and_then(|last| book.abilities(&last.medal, last.level).get(last.index));
-            return Some(FiredAbility { ability, replayed });
-        }
-        self.last_ability = Some(fired.clone());
-        Some(FiredAbility { ability, replayed: None })
+    /// 盤面で直前に適用を確定した非再生の能力（再生の解決に使う。基本設計 3.14）。
+    pub fn last_ability(&self) -> Option<&AbilityRef> {
+        self.last_ability.as_ref()
+    }
+
+    /// 能力の適用を確定した（[`crate::firing::commit`] だけが呼ぶ）。
+    pub(crate) fn record_ability(&mut self, ability: AbilityRef) {
+        self.last_ability = Some(ability);
+    }
+
+    /// 乱数の現在の状態（計画で候補状態を計算するための写し）。
+    pub(crate) fn rng(&self) -> &SessionRng {
+        &self.rng
+    }
+
+    /// 確定した計画の乱数の状態を反映する（[`crate::firing::commit`] だけが呼ぶ）。
+    pub(crate) fn set_rng(&mut self, rng: SessionRng) {
+        self.rng = rng;
     }
 
     /// 所持しているメダル種の、今のレベルでの物理特性。所持していなければ `None`。
@@ -419,6 +414,12 @@ impl GameSession {
         let level = self.medals.level(medal)?;
         specs.medal(medal, level).copied()
     }
+}
+
+/// 素材メダルから1つ選ぶ（同じ乱数の状態なら同じ結果。計画は候補状態の写しで呼ぶ）。
+pub(crate) fn pick_element(rng: &mut SessionRng, specs: &SpecCatalog) -> Option<MedalCode> {
+    let i = rng.pick(specs.elements().count())?;
+    specs.elements().nth(i).cloned()
 }
 
 #[cfg(test)]
@@ -957,118 +958,7 @@ mod tests {
         assert!(session.medals_fell(100.0, &catalog).is_empty());
     }
 
-    // ── 能力の発動と再生 ──
-
-    /// fire: 接触で爆風（Lv.2 は倍率2）。water: 直前の能力を再生する。
-    fn ability_catalog() -> SpecCatalog {
-        use crate::{
-            ability::{AbilityDef, Area, CollideWith, Direction, Target, Trigger},
-            spec::abilities::MedalAbilities,
-        };
-        let blast = AbilityDef {
-            on: Trigger::Collide(CollideWith::Any),
-            target: Target::Both,
-            area: Area::Radius(p(1.0)),
-            effects: vec![Effect::Push { dir: Direction::Outward, strength: p(2.0) }],
-            uses: None,
-        };
-        let replay = AbilityDef { effects: vec![Effect::Replay], ..blast.clone() };
-        let mut parts = spec_parts();
-        parts.abilities.scale = [p(1.0), p(2.0), p(1.0), p(1.0)];
-        parts.abilities.medals = std::collections::BTreeMap::from([
-            (fire(), MedalAbilities { base: vec![blast], awaken: vec![] }),
-            (water(), MedalAbilities { base: vec![replay], awaken: vec![] }),
-        ]);
-        SpecCatalog::new(parts).expect("valid")
-    }
-
-    fn fired(medal: MedalCode, level: u8) -> AbilityRef {
-        AbilityRef { medal, level: lv(level), index: 0 }
-    }
-
-    fn strength(ability: &crate::ability::AbilityDef) -> f32 {
-        match ability.effects[0] {
-            Effect::Push { strength, .. } => strength.get(),
-            _ => panic!("not a push"),
-        }
-    }
-
-    #[rstest]
-    fn an_ability_fires_without_replaying(started: (GameSession, Stage)) {
-        let (mut session, _) = started;
-        let specs = ability_catalog();
-        let out = session
-            .fire_ability(&fired(fire(), 1), &specs)
-            .expect("fired");
-        assert_eq!(strength(out.ability), 2.0);
-        assert_eq!(out.replayed, None);
-    }
-
-    #[rstest]
-    fn replay_fires_the_last_ability_at_its_level(started: (GameSession, Stage)) {
-        let (mut session, _) = started;
-        let specs = ability_catalog();
-        session.fire_ability(&fired(fire(), 2), &specs);
-        let out = session
-            .fire_ability(&fired(water(), 1), &specs)
-            .expect("fired");
-        assert_eq!(out.ability.effects, [Effect::Replay]);
-        assert_eq!(out.replayed.map(strength), Some(4.0), "the level 2 blast");
-    }
-
-    #[rstest]
-    fn replay_with_nothing_before_replays_nothing(started: (GameSession, Stage)) {
-        let (mut session, _) = started;
-        let specs = ability_catalog();
-        let out = session
-            .fire_ability(&fired(water(), 1), &specs)
-            .expect("fired");
-        assert_eq!(out.replayed, None);
-    }
-
-    /// 再生を記録すると、再生が再生を呼び続ける。
-    #[rstest]
-    fn a_replay_is_not_recorded(started: (GameSession, Stage)) {
-        let (mut session, _) = started;
-        let specs = ability_catalog();
-        session.fire_ability(&fired(fire(), 1), &specs);
-        session.fire_ability(&fired(water(), 1), &specs);
-        let again = session
-            .fire_ability(&fired(water(), 1), &specs)
-            .expect("fired");
-        assert_eq!(again.replayed.map(strength), Some(2.0), "still the blast");
-    }
-
-    #[rstest]
-    fn an_undefined_ability_fires_nothing_and_is_not_recorded(started: (GameSession, Stage)) {
-        let (mut session, _) = started;
-        let specs = ability_catalog();
-        session.fire_ability(&fired(fire(), 1), &specs);
-        let unknown = AbilityRef { index: 5, ..fired(fire(), 1) };
-        assert_eq!(session.fire_ability(&unknown, &specs), None);
-        assert_eq!(session.fire_ability(&fired(sauna(), 1), &specs), None);
-        let out = session
-            .fire_ability(&fired(water(), 1), &specs)
-            .expect("fired");
-        assert_eq!(out.replayed.map(strength), Some(2.0));
-    }
-
-    #[rstest]
-    fn no_ability_fires_while_an_evolution_is_pending_or_after_the_game(
-        started: (GameSession, Stage),
-    ) {
-        let (mut session, stage) = started;
-        let specs = ability_catalog();
-        session.medals_fell(10.0, &specs);
-        assert_eq!(session.fire_ability(&fired(fire(), 1), &specs), None);
-        session
-            .evolve(Evolution::LevelUp(MedalCode::normal()), &specs)
-            .expect("level up");
-        let enemy = session.advance(&stage, Tick(0))[0].enemy;
-        session.enemy_reached_goal(enemy, GoalId(1));
-        assert_eq!(session.fire_ability(&fired(fire(), 1), &specs), None);
-        assert_eq!(session.last_ability, None, "nothing was recorded");
-    }
+    // ── ゲージと乱数 ──
 
     /// Easy は1枚4ポイント、10で満タン（spec の fixture）。
     #[rstest]
