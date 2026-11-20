@@ -103,6 +103,21 @@ impl PlayerProgress {
         Difficulty::new(level).expect("unlocked level is within 1..=4")
     }
 
+    /// この難易度がステージで解放済みか。開始の受付と結果の記録の両方がこれを使う。
+    pub fn ensure_unlocked(
+        &self,
+        stage: &StageId,
+        difficulty: Difficulty,
+    ) -> Result<(), ProgressError> {
+        if difficulty > self.unlocked_difficulty(stage) {
+            return Err(ProgressError::LockedDifficulty {
+                stage: stage.clone(),
+                requested: difficulty,
+            });
+        }
+        Ok(())
+    }
+
     /// 1回のゲーム結果を記録する唯一の入口。検証失敗時は状態を一切変更しない。
     pub fn record_session_result(
         &mut self,
@@ -111,12 +126,7 @@ impl PlayerProgress {
         difficulty: Difficulty,
         won: bool,
     ) -> Result<RecordOutcome, ProgressError> {
-        if difficulty > self.unlocked_difficulty(stage) {
-            return Err(ProgressError::LockedDifficulty {
-                stage: stage.clone(),
-                requested: difficulty,
-            });
-        }
+        self.ensure_unlocked(stage, difficulty)?;
         if self.games_played == u32::MAX {
             return Err(ProgressError::PlayLimitReached);
         }
@@ -225,6 +235,32 @@ mod tests {
             .record_session_result(&s, 5, Difficulty::EASY, true)
             .expect("replay");
         assert_eq!(progress.unlocked_difficulty(&s), Difficulty::HARDEST);
+    }
+
+    #[rstest]
+    #[case::easy_is_always_open(&[], 1, true)]
+    #[case::second_is_locked_at_first(&[], 2, false)]
+    #[case::loss_does_not_unlock(&[(1, false)], 2, false)]
+    #[case::win_unlocks_the_next(&[(1, true)], 2, true)]
+    #[case::win_unlocks_only_the_next(&[(1, true)], 3, false)]
+    fn difficulties_unlock_one_by_one(
+        #[case] results: &[(u8, bool)],
+        #[case] requested: u8,
+        #[case] unlocked: bool,
+    ) {
+        let mut progress = PlayerProgress::default();
+        let d = |level| Difficulty::new(level).expect("difficulty");
+        for &(level, won) in results {
+            progress
+                .record_session_result(&stage("s1"), 1, d(level), won)
+                .expect("recorded");
+        }
+        let expected = if unlocked {
+            Ok(())
+        } else {
+            Err(ProgressError::LockedDifficulty { stage: stage("s1"), requested: d(requested) })
+        };
+        assert_eq!(progress.ensure_unlocked(&stage("s1"), d(requested)), expected);
     }
 
     #[test]

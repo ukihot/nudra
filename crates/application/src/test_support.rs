@@ -170,6 +170,7 @@ pub fn spec_parts() -> SpecParts {
             threshold: NonZeroU32::new(10).expect("non-zero"),
             points_per_medal: [10, 5, 2, 1],
         },
+        abilities: Default::default(),
     }
 }
 

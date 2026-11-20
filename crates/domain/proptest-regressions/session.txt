@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 49735560e8d600bc48c09b008c9a431f0d05ca33d622ee40aeaad8844ac5aedf # shrinks to ops = [Fell(1), Fell(1)]
+cc b208996fc4e358a45beff50edb1881c0b50cc4bd4052e745d9b9684c818cb400 # shrinks to evolutions = [Acquire(MedalId("water")), Acquire(MedalId("fire")), LevelUp(MedalId("fire")), LevelUp(MedalId("fire")), LevelUp(MedalId("water")), LevelUp(MedalId("water")), LevelUp(MedalId("water")), LevelUp(MedalId("fire")), LevelUp(MedalId("normal"))]

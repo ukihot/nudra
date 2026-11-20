@@ -109,6 +109,15 @@ pub enum EvolutionError {
     AlreadyOwned(MedalId),
 }
 
+/// 進化画面の選択肢。`available` が偽なら表示だけする（錬成素材のレベル不足・結果を所持済み）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvolutionChoice {
+    pub evolution: Evolution,
+    /// 選んだ結果のメダル種（レベルアップは同じ種、錬成は結果の種、New! は獲得する種）
+    pub result: MedalId,
+    pub available: bool,
+}
+
 /// 進化の結果: どのメダル種が何レベルになったか。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Evolved {
@@ -144,32 +153,47 @@ impl MedalCollection {
         recipe: impl Fn(&MedalId, &MedalId) -> Option<MedalId>,
         offered: Option<&MedalId>,
     ) -> Result<Evolved, EvolutionError> {
+        // 検証がすべて済んでから変更する（全か無か）
+        let evolved = self.check(&evolution, recipe, offered)?;
+        if let Evolution::Fuse(a, b) = &evolution {
+            self.0.remove(a);
+            self.0.remove(b);
+        }
+        self.0.insert(evolved.medal.clone(), evolved.level);
+        Ok(evolved)
+    }
+
+    /// 状態を変えずに、進化の可否と結果を調べる。`evolve` と進化画面の選択肢の両方がこれを使う。
+    pub fn check(
+        &self,
+        evolution: &Evolution,
+        recipe: impl Fn(&MedalId, &MedalId) -> Option<MedalId>,
+        offered: Option<&MedalId>,
+    ) -> Result<Evolved, EvolutionError> {
         match evolution {
             Evolution::Acquire(medal) => {
-                if self.0.contains_key(&medal) {
-                    return Err(EvolutionError::AlreadyOwned(medal));
+                if self.0.contains_key(medal) {
+                    return Err(EvolutionError::AlreadyOwned(medal.clone()));
                 }
-                if offered != Some(&medal) {
-                    return Err(EvolutionError::NotOffered(medal));
+                if offered != Some(medal) {
+                    return Err(EvolutionError::NotOffered(medal.clone()));
                 }
-                self.0.insert(medal.clone(), MedalLevel::MIN);
-                Ok(Evolved { medal, level: MedalLevel::MIN })
+                Ok(Evolved { medal: medal.clone(), level: MedalLevel::MIN })
             },
             Evolution::LevelUp(medal) => {
-                let Some(level) = self.level(&medal) else {
-                    return Err(EvolutionError::NotOwned(medal));
-                };
-                let Some(next) = level.next() else {
-                    return Err(EvolutionError::AtMaxLevel(medal));
-                };
-                self.0.insert(medal.clone(), next);
-                Ok(Evolved { medal, level: next })
+                let level = self
+                    .level(medal)
+                    .ok_or_else(|| EvolutionError::NotOwned(medal.clone()))?;
+                let next = level
+                    .next()
+                    .ok_or_else(|| EvolutionError::AtMaxLevel(medal.clone()))?;
+                Ok(Evolved { medal: medal.clone(), level: next })
             },
             Evolution::Fuse(a, b) => {
                 if a == b {
                     return Err(EvolutionError::SameMedal);
                 }
-                for medal in [&a, &b] {
+                for medal in [a, b] {
                     match self.level(medal) {
                         None => return Err(EvolutionError::NotOwned(medal.clone())),
                         Some(level) if level != MedalLevel::MAX => {
@@ -178,16 +202,11 @@ impl MedalCollection {
                         Some(_) => {},
                     }
                 }
-                let Some(result) = recipe(&a, &b) else {
-                    return Err(EvolutionError::NoRecipe(a, b));
-                };
+                let result =
+                    recipe(a, b).ok_or_else(|| EvolutionError::NoRecipe(a.clone(), b.clone()))?;
                 if self.0.contains_key(&result) {
                     return Err(EvolutionError::ResultAlreadyOwned(result));
                 }
-                // 検証がすべて済んでから変更する（全か無か）
-                self.0.remove(&a);
-                self.0.remove(&b);
-                self.0.insert(result.clone(), MedalLevel::MIN);
                 Ok(Evolved { medal: result, level: MedalLevel::MIN })
             },
         }

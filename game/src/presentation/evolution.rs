@@ -49,13 +49,13 @@ fn spawn_evolution(mut commands: Commands, model: Res<EvolutionModel>) {
             Evolution::Fuse(..) => Ui::Fuse,
             Evolution::Acquire(_) => Ui::NewMedal,
         };
-        let color = if choice.enabled {
+        let color = if choice.available {
             Color::srgb(0.3, 0.4, 0.2)
         } else {
             Color::srgb(0.13, 0.13, 0.13)
         };
         let action = choice.evolution.clone();
-        let enabled = choice.enabled;
+        let enabled = choice.available;
         let button = commands
             .spawn((
                 Hovered::default(),

@@ -5,6 +5,9 @@ use std::{
     num::NonZeroU32,
 };
 
+pub mod abilities;
+
+use self::abilities::{AbilityBook, AbilityBookError, AbilityParts};
 use crate::{
     difficulty::Difficulty,
     evolution::MedalLevel,
@@ -80,10 +83,14 @@ pub struct SpecParts {
     /// 錬成レシピ `(A, B, 結果)`。AとBの順序は問わない
     pub fusions: Vec<(MedalId, MedalId, MedalId)>,
     pub evolution: EvolutionRules,
+    /// 能力・印・反応（基本設計 3.14）
+    pub abilities: AbilityParts,
 }
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum SpecError {
+    #[error(transparent)]
+    Ability(#[from] AbilityBookError),
     #[error("spec for {0} medal is missing")]
     MissingMedal(MedalId),
     #[error("a medal cannot be fused with itself ({0})")]
@@ -110,11 +117,12 @@ pub struct SpecCatalog {
     /// 正規化した `(小, 大)` → 結果
     fusions: BTreeMap<(MedalId, MedalId), MedalId>,
     evolution: EvolutionRules,
+    abilities: AbilityBook,
 }
 
 impl SpecCatalog {
     pub fn new(parts: SpecParts) -> Result<Self, SpecError> {
-        let SpecParts { medals, enemies, fusions, evolution } = parts;
+        let SpecParts { medals, enemies, fusions, evolution, abilities } = parts;
         match medals.get(&MedalId::normal()).map(|def| def.tier) {
             None => return Err(SpecError::MissingMedal(MedalId::normal())),
             Some(MedalTier::Normal) => {},
@@ -150,7 +158,14 @@ impl SpecCatalog {
             }
             recipes.insert(pair(&a, &b), result);
         }
-        Ok(Self { medals, enemies, fusions: recipes, evolution })
+        let abilities = AbilityBook::new(abilities, |m| medals.contains_key(m))?;
+        Ok(Self {
+            medals,
+            enemies,
+            fusions: recipes,
+            evolution,
+            abilities,
+        })
     }
 
     /// そのレベルでのメダルの物理特性。
@@ -188,6 +203,11 @@ impl SpecCatalog {
 
     pub fn evolution(&self) -> &EvolutionRules {
         &self.evolution
+    }
+
+    /// メダルの能力・印・反応。
+    pub fn abilities(&self) -> &AbilityBook {
+        &self.abilities
     }
 
     /// 定義済みの錬成レシピ（素材ID順）。進化画面の選択肢の生成に使う。
@@ -284,6 +304,7 @@ pub(crate) mod fixture {
                 threshold: NonZeroU32::new(10).expect("non-zero"),
                 points_per_medal: [4, 3, 2, 1],
             },
+            abilities: AbilityParts::default(),
         }
     }
 
@@ -324,6 +345,21 @@ mod tests {
         assert_eq!(catalog.medal(&MedalId::new("ice"), lv(1)), None);
         assert_eq!(catalog.tier(&fire()), Some(MedalTier::Element));
         assert_eq!(catalog.enemy(&EnemyTypeId::new("grunt")), Some(&enemy()));
+    }
+
+    #[rstest]
+    fn invalid_abilities_reject_the_catalog() {
+        let mut parts = parts();
+        parts
+            .abilities
+            .medals
+            .insert(MedalId::new("ghost"), abilities::MedalAbilities::default());
+        assert_eq!(
+            SpecCatalog::new(parts).err(),
+            Some(SpecError::Ability(AbilityBookError::UnknownMedal(MedalId::new(
+                "ghost"
+            ))))
+        );
     }
 
     #[rstest]

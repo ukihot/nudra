@@ -19,7 +19,9 @@
 - メダル・敵・Pusherの位置や速度はECS（Avian）が正本。Domainに二重に持たない。
 - 外側への指示（射出・出現など）はユースケースの戻り値で返す。出力ポートtraitは作らない。
 - game crate の依存性逆転は Bevy 流（基本設計 5.6）。Infrastructure と Presentation は互いを参照せず、
-  `game/src/port.rs` の Message・読み取り専用Resource・Component だけで連携する。ユースケースを呼ぶのはInfrastructureだけ。
+  `game/src/port`（`request.rs`＝入力、`response.rs`＝出力、`appearance.rs`＝見た目の指定）の
+  Message・読み取り専用Resource・Component だけで連携する。ユースケースを呼ぶのはInfrastructureだけ。
+- ゲームのルール（可否の判定）を game 側に書かない。ユースケースの `Result` を `RequestStatus` に写すだけにする。
 - 見た目は Infrastructure が `Appearance`（key + 仮形状）で指定し、Presentation が `visuals.visuals.ron` で解決する。
   アセットの差し替えはこの定義ファイルの書き換えで行い、コードを変えない。
 

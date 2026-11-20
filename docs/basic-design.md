@@ -293,13 +293,15 @@ stateDiagram-v2
 | 操作 | 戻り値 | Playing以外のとき |
 |---|---|---|
 | `start(id, &Stage, &PusherCharacter, difficulty, &EvolutionRules, seed)` | `(GameSession, DomainEvent)`（GameStarted） | — |
-| `advance(&Stage, now: Tick)` | `Vec<SpawnOrder>`（EnemyId発行済み） | 空を返す |
+| `advance(&Stage, now: Tick)` | `Vec<SpawnOrder>`（EnemyId発行済み） | 空を返す（進化の選択待ちの間も） |
 | `ensure_playing()` | `Result<(), GameSessionError>` | `Err(NotPlaying)` |
+| `ensure_running()` | `Result<(), GameSessionError>`（Playing かつ進化の選択待ちでない。射出・メダル選択・出現の前提） | `Err(NotPlaying)`。選択待ちは `Err(EvolutionPending)` |
 | `enemy_fell(EnemyId)` | `Vec<DomainEvent>`（EnemyDefeated、WaveCleared / GameWon） | 空を返す |
 | `enemy_reached_goal(EnemyId, GoalId)` | `Vec<DomainEvent>`（EnemyReachedGoal, GameLost） | 空を返す |
 | `medal_spec(&MedalId, &SpecCatalog)` | `Option<MedalSpec>`（現在レベルの定義） | 同左 |
 | `medals_fell(count, &SpecCatalog)` | `Vec<DomainEvent>`（EvolutionReady） | 空を返す |
 | `evolve(Evolution, &SpecCatalog)` | `Result<DomainEvent, GameSessionError>`（Evolved） | `Err(NotPlaying)` |
+| `evolution_choices(&SpecCatalog)` | 進化画面の選択肢 `EvolutionChoice { evolution, result, available }` の列。可否は `evolve` と同じ検証（`MedalCollection::check`）で決める | 同左 |
 
 区別の原則:
 
@@ -639,61 +641,95 @@ flowchart LR
 現在の同梱データはノーマル1種・素材16種・錬成72種（全89種）。全256組について、錬成可否・結果・対称性を正本と照合する。
 特殊効果は未実装。レベル別の物理特性・進化ゲージの数値は検証用の仮値。
 
-#### 物理による効果
+## 3.14 メダルの能力（確定方針）
 
-敵にHPは無い（要件2.4）。効果はすべて**物理で表す**: 押す・引く・浮かせる・滑らせる・止める・重さを変える。
-効果は少数の**効果の部品**（コードで実装）の組み合わせとして定義データに書く。新しいメダルはデータの追加で作れる。
+説明文の正本は [medal-abilities.csv](medal-abilities.csv)（メダル名・能力の説明文）。
+能力は**少数の語彙（コード）の組み合わせを定義データに書く**。メダルIDで分岐するコードは書かない。
+データで表せない能力が出たら、特例ではなく語彙を1つ足す（レビュー対象）。
 
-| 効果の部品 | 物理での表し方 |
+### 能力 = いつ × 誰に × どこに × 何を（`domain::ability`）
+
+| 語彙 | 値 |
 |---|---|
-| 爆風 `Blast` | 着弾点から放射状のインパルス |
-| 突風 `Gust` | 一方向（射出方向）への広い押し出し |
-| 引力 `Pull` | 一点（または奈落方向）へ引き寄せる力 |
-| 浮上 `Lift` | 上向きのインパルス（メダルの山を崩す） |
-| 床効果 `Floor` | 一定時間、その範囲の摩擦を上げる／下げる |
-| 足止め `Stall` | 敵の歩行力を一定時間0にする（気絶・幻惑） |
-| 減速 `Slow` | 敵の最大速度を一定時間下げる |
-| 重さ `Weight` | メダル自体の質量・大きさを変える（重い・巨大） |
-| 弱体 `Weaken` | 敵の質量を一定時間下げる（押し流されやすくなる） |
-| 迷走 `Confuse` | 敵の進行方向を一定時間ずらす（奈落側へ歩く） |
+| `Trigger`（いつ） | `Always` 常時 / `Launch` 射出 / `Land` 着地 / `Rest` 静止した / `Wake` 押されて動き出した / `Collide(Medals|Enemies|Any)` ぶつかった（同じ相手に1回） / `Fuse(Ticks)` 時限 / `Periodic(Ticks)` 一定間隔 / `SelfFell` 自分が落ちた / `OtherFell` 他が落ちた |
+| `Target`（誰に） | `Itself` / `Medals` / `Enemies` / `Both` |
+| `Area`（どこに） | `Touched` ぶつかった相手 / `Radius(r)` / `Front { length, width }` 射出方向の帯 / `Board` 盤面全体 |
+| `Effect`（何を） | `Push { dir, strength }`（外へ・内へ・前・後・上・渦・奈落へ） / `Mark` 印を付ける / `Cleanse` 浄化 / `Zone` 場（一定時間残る範囲） / `Spawn` 生成 / `Transform` 変化 / `Remove` 消去 / `Split` 分割 / `Gauge` ゲージ加算 / `Revive` 落ちた自分が戻る / `Replay` 直前の能力を再生 |
+| `uses` | 1個体あたりの発動回数の上限 |
 
-#### 素材16種の効果（案）
+- 座標を使う判定（範囲内の対象・向き）はECSが行い、domainは意味だけを決める。
+- **場（`Zone`）**: 発動した位置に `duration` の間残り、中にいる対象（能力の `Target`）へ余韻 `linger` の長さの印を付け続ける
+  （`Effect::zone_mark`）。場を出ても余韻の間は印が残る。例: 炎は敵に「アチチ」の場を残し、敵がスムーズに進めなくなる。
+- **再生（`Replay`）**: 盤面で直前に発動した能力を、再生したメダルの位置でもう一度発動する。直前の能力は `GameSession` が
+  記録し（`fire_ability`）、再生を含む能力は記録しない（再生が再生を呼び続けないため）。進行できない間は何も発動・記録しない。
+- **レベル**: `AbilityParts.scale`（Lv.1〜4の倍率）を強さ・範囲・印と場の時間・ポイントに掛ける（時間とポイントは四捨五入）。
+  発動の時間・回数・個数には掛けない。**Lv.4で覚醒**（`awaken` の能力が加わる。覚醒にも倍率を掛ける）。
+- 倍率と覚醒は**読込時に Lv.1〜4 の能力として計算済み**にし（`AbilityBook`）、実行中に失敗しない。
 
-| 素材 | 効果 | 部品 |
-|---|---|---|
-| 炎 | 着弾で熱風。周りのメダルと敵を外へ弾く | 爆風 |
-| 砂 | 砂だまり。範囲の床が重くなり敵が歩きにくい | 床効果（摩擦↑）＋減速 |
-| 水 | 水たまり。床が滑り、敵もメダルも流されやすい | 床効果（摩擦↓） |
-| 光 | まぶしさで近くの敵が立ち止まる | 足止め |
-| 浄化 | 中ボスの能力を一定時間打ち消す | （能力解除。能力の仕様確定後） |
-| 血 | 当たった敵に印。その敵は軽くなり押されやすい | 弱体 |
-| 毒 | じわじわ効く毒。範囲の敵が遅く・軽くなる | 減速＋弱体 |
-| 雷 | 当たった敵から近くの敵へ連鎖して一瞬しびれる | 足止め（連鎖） |
-| 風 | 射出方向へ突風。メダルの山ごと押し流す | 突風 |
-| 幻 | 幻を見せて敵を迷わせ、奈落側へ歩かせる | 迷走 |
-| 死 | 奈落の縁にいる敵を奈落へ引きずり込む | 引力（奈落方向） |
-| 星 | 小さな重力異常。周りのメダルを浮かせて崩す | 浮上 |
-| 時 | 範囲の敵の時間を遅らせる | 減速（強） |
-| 刃 | 鋭く速い薄いメダル。敵を貫いて後ろの敵も押す | 重さ（薄く速い）＋貫通 |
-| 太陽 | 巨大なメダル。ゆっくり転がり何でも押しのける | 重さ（大きさ↑） |
-| 山 | 最も重いメダル。押されず、敵の通り道をふさぐ | 重さ（質量↑） |
+### 印と状態（`domain::mark`）
 
-#### 錬成メダルの効果
+- 印（濡れ・砂・毒…）の種類と効き目は定義データ（`MarkDef`）。効き目の語彙 `Modifiers` だけがコード:
+  摩擦の上書き・質量・大きさ・敵の速さ（0で足止め）・進路のずれ・価値（落下時のゲージの倍率。0で偽物）・封印・すり抜け。
+  `harmful`（浄化で消える）、`vanish`（期限切れで持ち主が消え、落下と同じに数える）、`max_stacks`。
+- 生成時に値域を検証する（摩擦 0〜2、倍率は質量・大きさ 1/16〜16、速さ・価値 0〜16、進路 ±π）。
+- 個体の状態 `Conditions` は**値としてECSのComponentが持つ**（個体はECSが正本。`MovementState` と同じ扱い）。
+  変化のルールはdomainに閉じる:
+  - 重ね掛けは上限まで、期限は遅い方（永続が最強）
+  - `until <= now` で外れる
+  - 浄化は悪い印だけ／すべて
+  - 合成は倍率の `stacks` 乗の積、摩擦は後に付いた印が勝つ。合成結果は値域に収める
 
-- 錬成メダルは**両方の素材の効果を受け継ぎ**、名前に合わせた**ひとひねり**を加える。例:
+### 反応（`domain::reaction`）
 
-  | 錬成メダル | 素材 | 効果（案） |
-  |---|---|---|
-  | 焼きいも | 炎＋砂 | 熱い砂だまり。踏んだ敵が熱さで跳ね退き（爆風）、足も取られる（摩擦↑） |
-  | サウナ | 炎＋水 | 蒸気で範囲の敵がのぼせて止まる（足止め＋床が滑る） |
-  | 花火 | 炎＋光 | 時間差で連続して弾ける（爆風×複数回）＋まぶしさで足止め |
-  | 台風 | 水＋風 | 広範囲の渦。周りを巻き込みながら一方向へ押し流す（突風＋床が滑る） |
-  | ブラックホール | 死＋星 | 一点に強い引力。周りの敵とメダルを吸い寄せてから奈落へ |
-  | 化石 | 時＋山 | 動かない重い化石になり、敵の通り道を長く塞ぐ（重さ↑↑＋減速） |
+- 「対象にある印 `on` に、印 `by` が付いたら効果を足す（`consume` なら `on` を外す）」を定義データに書く。
+- 反応するのは**当たる前から対象にあった印だけ**。同じ当たりで付く印どうしは反応しない。
+- **反応は1段まで**。反応で付いた印から、さらに反応は起こさない（組み合わせの爆発と無限連鎖を防ぐ）。
+- `hit()` は状態の効果（印・浄化）を適用し、反応で増えた状態以外の効果（押す・消す…）を返す。後者はECSが対象の位置で実行する。
 
-- 【未決】72種すべての効果の詳細と数値。部品の組み合わせとして定義データに書き、調整する。
+### 読込時の検証（`AbilityBookError`、`SpecError::Ability` で包む）
+
+| 検証 | Error |
+|---|---|
+| 印の重複・未定義の印の参照（能力・場・生成・反応） | `DuplicateMark` / `UnknownMark` |
+| 反応の組の重複 | `DuplicateReaction` |
+| 未定義のメダルの能力 | `UnknownMedal` |
+| 長さ0の時限・間隔・印・場・余韻（倍率適用後に検査） | `ZeroDuration` / `ReactionZeroDuration` |
+| 反応の効果に再生は書けない | `ReplayInReaction` |
+| `Revive` は `SelfFell` で、回数制限つき | `InvalidRevive` |
+| ノーマル以外の生成は、回数制限か封印の印が必要（**無限増殖の防止**） | `UnboundedSpawn` |
+| 倍率を掛けた値が値域を外れる | `Scale` |
+
+- 【未決】89種の説明文から語彙への割り当てと数値（定義データ）。次の段階で `game.specs.ron` に書き、説明文と並べて確認する。
+- 【未決】ゲージへの価値の反映（`medals_fell` を枚数から価値の合計にする）、`Revive`・`Spawn` の位置、盤面のメダル数の上限（性能の安全装置）。
 
 ---
+
+## 3.15 メダルの挙動ステータス（`domain::motion`）
+
+能力の発動と見た目（アニメ・アセットの切り替え）を、**同じ1つの挙動ステータス**で決める。
+ステータスは描画ではなく**物理（固定ステップ）から決める**（フレームレートで結果が変わらず、テストできる）。
+
+```text
+射出 ──► 飛行中 ──着地──► 転がり中 ⇄ 静止
+           ▲                 │
+           └──── 浮かされた ──┘（上へ押されると飛行中に戻り、着地でまた発動する）
+```
+
+| 層 | 役割 |
+|---|---|
+| domain | 状態遷移のルール `MedalMotion::observe(sample, now, rules) -> Option<MotionEvent>`、浮かせる `lift()` |
+| Infrastructure | 毎tick、速度と接地（`MotionSample`）を測って渡し、`MedalMotion` を Component として持つ。出来事を `Happening` にして発動する能力を `AbilityBook::triggered` で引く |
+| Presentation | 同じ Component を読んでアニメ・アセットを切り替える（能力の発動と見た目がずれない） |
+
+- 出来事 `MotionEvent`: `Landed`（飛行中 → 盤面）、`Rested`（転がり中 → 静止）、`Woke`（静止 → 転がり中）。1回の観測で高々1つ。
+- **静止は「`rest_speed` 未満が `rest_delay` 続いた」、再始動は「`wake_speed` を超えた」**。`rest_speed < wake_speed` のヒステリシスで、
+  止まりかけのメダルが静止と転がりを行き来して毎tick発動することを防ぐ（`MotionRules::new` が検証）。
+  既定は秒速5cm未満が0.2秒で静止、秒速15cm超で再始動（調整ノブ）。
+- 跳ねて浮いても飛行中には戻さない。**飛行中に戻すのは `lift()`（上へ押す効果）だけ**。浮かせて着地させる連鎖（星で浮かせる → 着地で爆発）はルールとして起こせるが、跳ね返りで勝手に連発しない。
+- 初期配置のメダルは静止（`MedalMotion::placed()`）から始める。
+- 発動の判定 `Trigger::fires_on(Happening)`: 射出・着地・静止・再始動・衝突（相手の種類で絞れる）・落下。時限・間隔・常時はECSがスケジュールする。
+- 【未決】`MotionRules` を定義データ（`SpecParts`）に載せるか。当面は `MotionRules::default()`。
+
 
 # 4. アプリケーション層設計（crates/application）
 
@@ -710,11 +746,13 @@ flowchart LR
 
 | ユースケース | 入力 | 出力 | Error | 呼び出し元 |
 |---|---|---|---|---|
+| `check_start` | Repository、`&PlayerProgress`、ステージ・キャラクター・難易度 | `()` | `StartGameError` | Update / 開始の指図の受付 |
 | `start_game` | Repository、SpecCatalog、`StartGameCommand { session_id, stage_id, character_id, difficulty, seed }` | `StartGameOutput { session, stage, character, pusher: PusherSetup, event }` | `StartGameError` | OnEnter(Starting) |
 | `launch_medal` | `&GameSession`, `&Stage`, `&mut CatapultState`, `&SpecCatalog`, now | `LaunchOutput { plan, event }` | `LaunchMedalError` | FixedUpdate / Command |
 | `advance_waves` | `&mut GameSession`, `&Stage`, dt | `Vec<SpawnOrder>`、EnemySpawnedイベント | なし | FixedUpdate / Intent |
 | `resolve_physics` | `&mut GameSession`, `&mut Vec<PhysicsFact>`, `&SpecCatalog` | `Vec<DomainEvent>` | なし | FixedUpdate / Resolve |
-| `evolve` | `&mut GameSession`, `&SpecCatalog`, `Evolution` | `EvolveOutput`（イベント・変更後のSpec） | `GameSessionError` | Update / Evolving（時計停止中） |
+| `evolve` | `&mut GameSession`, `&mut CatapultState`, `&SpecCatalog`, `Evolution` | `EvolveOutput`（イベント・変更後のSpec） | `GameSessionError` | Update / Evolving（時計停止中） |
+| `select_medal` | `&GameSession`, `&mut CatapultState`, `MedalId` | `()` | `SelectMedalError` | Update / Running（メダル選択の指図） |
 
 ## 4.3 PhysicsFact（物理の結果からゲーム上の意味への変換点）
 
@@ -748,9 +786,9 @@ pub enum PhysicsFact {
 
 ### launch_medal（要件16.2）
 
-1. `session.ensure_playing()?`
-2. `let spec = session.medal_spec(state.selected(), specs);`
-3. `let plan = state.fire(stage.catapult(), &spec, now)?;`
+1. `session.ensure_running()?`（終了後・進化の選択中は撃たない）
+2. `let spec = session.medal_spec(state.selected(), specs).ok_or(NotOwned)?;`
+3. `state.fire(stage.catapult(), &spec, now)` が `None`（発射周期の途中）なら `Ok(None)`。却下ではない
 4. `LaunchOutput { plan, event: MedalLaunched }`を返す
 
 ### AdvanceGame（要件16.3）
@@ -766,7 +804,7 @@ pub enum PhysicsFact {
 1. `session.evolve(choice, specs)?`。ゲージ・所持・レベル・錬成・New!の候補を検証する
 2. 変更後のSpecとイベントを返す
 3. game側で、該当種別の既存メダルの質量・Collider・摩擦・反発・仮形状を1回だけ更新する
-4. 錬成で選択中の素材が消費されたら、射出メダルをノーマルへ戻す。盤面上の素材個体は残す
+4. 錬成で選択中の素材が消費されたら、射出メダルをノーマルへ戻す（`evolve` ユースケースの中で行う）。盤面上の素材個体は残す
 5. 成功したときだけRunningへ戻す。却下時は時計停止とNew!の候補を保つ
 
 全メダルがLv.4で、未所持の素材も実行可能な錬成も無い場合、ゲージを蓄積しない。
@@ -783,16 +821,30 @@ pub enum StartGameError {
     StageNotFound(StageId),
     #[error("pusher character not found: {0}")]
     CharacterNotFound(PusherCharacterId),
+    #[error(transparent)]
+    Progress(#[from] ProgressError),     // LockedDifficulty（check_start）
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum LaunchMedalError {
     #[error(transparent)]
-    Session(#[from] GameSessionError),   // NotPlaying
+    Session(#[from] GameSessionError),   // NotPlaying / EvolutionPending
+    #[error("{0} medal is not owned")]
+    NotOwned(MedalId),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum SelectMedalError {
     #[error(transparent)]
-    Launch(#[from] LaunchError),         // CoolingDown
+    Session(#[from] GameSessionError),   // NotPlaying / EvolutionPending
+    #[error("{0} medal is not owned")]
+    NotOwned(MedalId),
 }
 ```
+
+- 発射周期の途中で撃たないことは却下ではない（`Ok(None)`）。そのため `LaunchError` は持たない（6.4）。
+- ゲームのルール（開始・メダル選択・進化の可否）は game 側に書かない。game 側はユースケースの `Result` を
+  `RequestStatus` に写すだけにする（`Session(_)` は `WrongState`、それ以外は `Invalid`）。
 
 ---
 
@@ -965,7 +1017,9 @@ PusherはStageと衝突させず、並進Yを固定して床からわずかに�
 ## 5.6 依存性逆転とMessage / Event / Observerの使い分け
 
 Bevy ECSの流儀で依存性を逆転する。ポートのtraitにDTOを流す代わりに、
-`game/src/port.rs` に置いた **Message・読み取り専用Resource・Component** を境界にする。
+`game/src/port` に置いた **Message・読み取り専用Resource・Component** を境界にする。
+入力（意図・指図）は `port/request.rs`、出力（指図の終端・ドメインイベント・`*Model`）は `port/response.rs`、
+見た目の指定（`Appearance`）は `port/appearance.rs` に分ける。利用側は `crate::port::X` で参照し、下位の構成に依存しない。
 InfrastructureとPresentationは`port`だけに依存し、互いを参照しない。
 
 | 方向 | 種類 | 型 |
@@ -1585,7 +1639,7 @@ game:
 | 25 | Pusherの成長（確定） | 成長しない。進化はメダルのみ（旧 `Upgrade::Pusher*` は廃止） | — |
 | 26 | メダル図鑑（確定） | ノーマル1・素材16・錬成72の全89種。錬成表は確定（3.13） | — |
 | 27 | New! の候補 | 未所持の素材から1つ（セッションのシードによる決定的な乱数） | ゲームデザイン |
-| 28 | メダルの効果 | 効果の部品の組み合わせ。素材16種は案あり、錬成72種は詳細未決 | ゲームデザイン |
+| 28 | メダルの能力 | 語彙・印・反応・検証はdomainに実装済み（3.14）。89種の説明文（medal-abilities.csv）から語彙への割り当てと数値は未決 | ゲームデザイン |
 | 29 | ステージGLBの取り込み | 制作はSOP＋Pack＋`path`でステージ全体を1つのGLBへ出力（5.8）。ランタイムへの接続は未実装 | Houdini 22での3部品の往復検証、部品Transformと物理・ゲーム設定の接続、射出口ノードの追加検証 |
 
 ---

@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc a535771e5b626dd1e14fcbbfa99c062557ce95f57a6abc188b71858f42644c3f # shrinks to applied = [(MarkDef { id: MarkId("sand"), harmful: true, max_stacks: 1, vanish: false, modifiers: Modifiers { friction: Some(1.2), mass: Positive(1.0), size: Positive(1.0), speed: 0.6, heading: 0.0, value: 1.0, sealed: false, ghost: false } }, None), (MarkDef { id: MarkId("sand"), harmful: true, max_stacks: 1, vanish: false, modifiers: Modifiers { friction: Some(1.2), mass: Positive(1.0), size: Positive(1.0), speed: 0.6, heading: 0.0, value: 1.0, sealed: false, ghost: false } }, None)], now = 0
+cc b87d7a162f4d8a4cd0712bdab3aaa060c98ba37e99142870237e4c50f1495d8a # shrinks to applied = [(MarkDef { id: MarkId("wet"), harmful: false, max_stacks: 1, vanish: false, modifiers: Modifiers { friction: Some(0.05), mass: Positive(1.0), size: Positive(1.0), speed: 1.0, heading: 0.0, value: 1.0, sealed: false, ghost: false } }, Some(72))], now = 72

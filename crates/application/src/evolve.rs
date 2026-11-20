@@ -1,9 +1,10 @@
-//! メダル進化（基本設計 3.12）。進化画面で選んだレベルアップ・錬成を実行する。
+//! メダル進化（基本設計 3.12）。進化画面で選んだレベルアップ・錬成・New! を実行する。
 
 use domain::{
     event::DomainEvent,
     evolution::Evolution,
     id::MedalId,
+    launch::CatapultState,
     session::{GameSession, GameSessionError},
     spec::{MedalSpec, SpecCatalog},
 };
@@ -15,12 +16,17 @@ pub struct EvolveOutput {
     pub medal: Option<(MedalId, MedalSpec)>,
 }
 
+/// 錬成で選択中のメダルを素材として消費したら、選択をノーマルへ戻す（所持しないメダルを撃たない）。
 pub fn evolve(
     session: &mut GameSession,
+    catapult: &mut CatapultState,
     specs: &SpecCatalog,
     evolution: Evolution,
 ) -> Result<EvolveOutput, GameSessionError> {
     let event = session.evolve(evolution, specs)?;
+    if session.medals().level(catapult.selected()).is_none() {
+        catapult.select(MedalId::normal());
+    }
     let medal = match &event {
         DomainEvent::Evolved { medal, .. } => session
             .medal_spec(medal, specs)
@@ -41,27 +47,117 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
-    use crate::test_support::{levels, session, specs, stage};
+    use crate::test_support::{fire, levels, sauna, session, specs, stage, water};
+
+    /// ゲージを満たしてから進化する（test_support: Easy は1枚で満タン）。
+    fn evolve_now(
+        session: &mut GameSession,
+        catapult: &mut CatapultState,
+        specs: &SpecCatalog,
+        evolution: Evolution,
+    ) -> Result<EvolveOutput, GameSessionError> {
+        session.medals_fell(1, specs);
+        evolve(session, catapult, specs, evolution)
+    }
 
     #[rstest]
     fn evolution_before_the_gauge_is_full_is_rejected(
         mut session: GameSession,
+        stage: Stage,
         specs: SpecCatalog,
     ) {
+        let mut catapult = CatapultState::new(stage.catapult());
         assert_eq!(
-            evolve(&mut session, &specs, Evolution::LevelUp(MedalId::normal())),
+            evolve(
+                &mut session,
+                &mut catapult,
+                &specs,
+                Evolution::LevelUp(MedalId::normal())
+            ),
             Err(GameSessionError::Evolution(EvolutionError::NotReady))
         );
     }
 
     #[rstest]
-    fn level_up_returns_the_new_spec_to_apply(mut session: GameSession, specs: SpecCatalog) {
-        session.medals_fell(1, &specs);
-        let out =
-            evolve(&mut session, &specs, Evolution::LevelUp(MedalId::normal())).expect("evolved");
+    fn level_up_returns_the_new_spec_and_keeps_the_selection(
+        mut session: GameSession,
+        stage: Stage,
+        specs: SpecCatalog,
+    ) {
+        let mut catapult = CatapultState::new(stage.catapult());
+        let out = evolve_now(
+            &mut session,
+            &mut catapult,
+            &specs,
+            Evolution::LevelUp(MedalId::normal()),
+        )
+        .expect("evolved");
         let level = MedalLevel::new(2).expect("valid");
         assert_eq!(out.event, DomainEvent::Evolved { medal: MedalId::normal(), level });
         assert_eq!(out.medal, Some((MedalId::normal(), levels()[1])));
+        assert_eq!(catapult.selected(), &MedalId::normal());
+    }
+
+    /// fire・water を取得して Lv.4 にし、fire を選んだ状態で錬成する。
+    #[rstest]
+    fn fusion_consuming_the_selected_medal_selects_normal(
+        mut session: GameSession,
+        stage: Stage,
+        specs: SpecCatalog,
+    ) {
+        let mut catapult = CatapultState::new(stage.catapult());
+        for _ in 0..2 {
+            session.medals_fell(1, &specs);
+            let offer = session.evolution_offer().cloned().expect("offered");
+            evolve(&mut session, &mut catapult, &specs, Evolution::Acquire(offer))
+                .expect("acquired");
+        }
+        for medal in [fire(), water()] {
+            for _ in 0..3 {
+                evolve_now(&mut session, &mut catapult, &specs, Evolution::LevelUp(medal.clone()))
+                    .expect("level up");
+            }
+        }
+        catapult.select(fire());
+
+        let out = evolve_now(&mut session, &mut catapult, &specs, Evolution::Fuse(fire(), water()))
+            .expect("fused");
+
+        assert_eq!(out.medal.map(|(m, _)| m), Some(sauna()));
+        assert_eq!(catapult.selected(), &MedalId::normal());
+    }
+
+    #[rstest]
+    fn evolution_that_keeps_the_selected_medal_keeps_the_selection(
+        mut session: GameSession,
+        stage: Stage,
+        specs: SpecCatalog,
+    ) {
+        let mut catapult = CatapultState::new(stage.catapult());
+        session.medals_fell(1, &specs);
+        let offer = session.evolution_offer().cloned().expect("offered");
+        evolve(&mut session, &mut catapult, &specs, Evolution::Acquire(offer.clone()))
+            .expect("acquired");
+        catapult.select(offer.clone());
+
+        evolve_now(&mut session, &mut catapult, &specs, Evolution::LevelUp(offer.clone()))
+            .expect("level up");
+
+        assert_eq!(catapult.selected(), &offer);
+    }
+
+    #[rstest]
+    fn rejected_evolution_keeps_the_selection(
+        mut session: GameSession,
+        stage: Stage,
+        specs: SpecCatalog,
+    ) {
+        let mut catapult = CatapultState::new(stage.catapult());
+        catapult.select(fire());
+        assert!(
+            evolve_now(&mut session, &mut catapult, &specs, Evolution::LevelUp(fire())).is_err()
+        );
+        assert_eq!(catapult.selected(), &fire());
     }
 
     #[rstest]
@@ -70,11 +166,17 @@ mod tests {
         stage: Stage,
         specs: SpecCatalog,
     ) {
-        session.medals_fell(1, &specs);
+        let mut catapult = CatapultState::new(stage.catapult());
         session.advance(&stage, Tick(0));
+        session.medals_fell(1, &specs);
         session.enemy_reached_goal(EnemyId(1), GoalId(1));
         assert_eq!(
-            evolve(&mut session, &specs, Evolution::LevelUp(MedalId::normal())),
+            evolve(
+                &mut session,
+                &mut catapult,
+                &specs,
+                Evolution::LevelUp(MedalId::normal())
+            ),
             Err(GameSessionError::NotPlaying(session.status()))
         );
     }

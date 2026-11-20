@@ -33,7 +33,7 @@ docs/
 ```
 
 依存の向きは `game → application → domain`（と `game → domain`）。domainは外側に依存しません。
-game の中では Infrastructure と Presentation が互いを参照せず、`game/src/port.rs` の Message・Resource だけで連携します。
+game の中では Infrastructure と Presentation が互いを参照せず、`game/src/port`（入力 `request.rs`・出力 `response.rs`・見た目 `appearance.rs`）の Message・Resource だけで連携します。
 
 ## 開発状況
 

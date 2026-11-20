@@ -10,8 +10,8 @@ use std::{num::NonZeroU32, time::Duration};
 
 use anyhow::Context;
 use application::{
-    StartGameCommand, advance_waves, evolve, launch_medal, record_result, resolve_physics,
-    start_game,
+    SelectMedalError, StartGameCommand, advance_waves, check_start, evolve, launch_medal,
+    record_result, resolve_physics, select_medal, start_game,
 };
 use avian3d::prelude::{Collider, Forces, Friction, Mass, Physics, PhysicsTime, Restitution};
 // Bevy 0.20 の prelude は `ContextExt`（`.context()`）を含み `anyhow::Context`
@@ -19,12 +19,11 @@ use avian3d::prelude::{Collider, Forces, Friction, Mass, Physics, PhysicsTime, R
 use bevy::prelude::{
     App, Commands, DetectChangesMut, Entity, FixedUpdate, In, IntoScheduleConfigs, IntoSystem,
     Last, MessageReader, MessageWriter, NextState, OnEnter, OnExit, Query, Res, ResMut, Resource,
-    State, SystemSet, Time, Update, debug, error, in_state, info, resource_exists,
+    State, SystemSet, Time, Update, debug, error, in_state, info, resource_exists, warn,
 };
 use domain::{
     difficulty::Difficulty,
     event::DomainEvent,
-    evolution::{Evolution, MedalLevel},
     id::{GameSessionId, MedalId, PusherCharacterId, StageId},
     launch::CatapultState,
     navigation::Route,
@@ -43,9 +42,9 @@ use super::{
 };
 use crate::{
     port::{
-        AimModel, Appearance, ControlIntent, DomainEventMsg, EvolutionChoice, EvolutionModel,
-        GameResult, HudModel, MedalModel, RejectReason, Request, RequestOutcome, RequestStatus,
-        Silhouette, SubmitRequest,
+        AimModel, Appearance, ControlIntent, DomainEventMsg, EvolutionModel, GameResult, HudModel,
+        MedalModel, RejectReason, Request, RequestOutcome, RequestStatus, Silhouette,
+        SubmitRequest,
     },
     state::{AppState, GamePhase},
 };
@@ -227,12 +226,9 @@ fn accept_start(
     };
 
     // 受付で実行可否を決める（実行段階に失敗し得る処理を残さない）
-    let status = match (
-        stages.0.contains_key(stage),
-        characters.0.contains_key(character),
-        *difficulty <= progress.unlocked_difficulty(stage),
-    ) {
-        (true, true, true) => {
+    let status = match check_start(&*stages, &*characters, &progress, stage, character, *difficulty)
+    {
+        Ok(()) => {
             commands.insert_resource(Selection {
                 stage: stage.clone(),
                 character: character.clone(),
@@ -243,16 +239,7 @@ fn accept_start(
             next.set(AppState::InGame);
             RequestStatus::Completed
         },
-        (false, _, _) => {
-            RequestStatus::Rejected(RejectReason::Invalid(format!("unknown stage {stage}")))
-        },
-        (_, false, _) => {
-            RequestStatus::Rejected(RejectReason::Invalid(format!("unknown character {character}")))
-        },
-        (_, _, false) => RequestStatus::Rejected(RejectReason::Invalid(format!(
-            "difficulty {} is locked",
-            difficulty.level()
-        ))),
+        Err(invalid) => RequestStatus::Rejected(RejectReason::Invalid(invalid.to_string())),
     };
     report([outcome(id, request, status)], &mut outcomes);
 }
@@ -346,8 +333,10 @@ fn finish_session(
     let session = &game.session;
     if session.status() != GameStatus::Playing {
         let record = record_result(&mut progress, session);
-        if record.is_ok() {
-            save.request(&progress);
+        match &record {
+            Ok(_) => save.request(&progress),
+            // 記録できなくてもリザルトへ進む（基本設計 5.7: 保存・記録の失敗でゲームを止めない）
+            Err(not_recorded) => warn!(%not_recorded, "game result was not recorded"),
         }
         let (best_defeated, new_record) =
             record.map_or((session.defeated(), false), |r| (r.best_defeated, r.new_record));
@@ -452,7 +441,8 @@ fn accept_evolution(
         let Request::Evolve(evolution) = &request else {
             return;
         };
-        let status = match evolve(&mut game.session, &specs, evolution.clone()) {
+        let ActiveGame { session, catapult, .. } = &mut *game;
+        let status = match evolve(session, catapult, &specs, evolution.clone()) {
             Ok(out) => {
                 if let Some((medal, spec)) = out.medal {
                     for (
@@ -473,14 +463,6 @@ fn accept_evolution(
                             height: spec.thickness.get(),
                         };
                     }
-                }
-                if game
-                    .session
-                    .medals()
-                    .level(game.catapult.selected())
-                    .is_none()
-                {
-                    game.catapult.select(MedalId::normal());
                 }
                 phase.set(GamePhase::Running);
                 events.write(DomainEventMsg(out.event));
@@ -607,43 +589,17 @@ fn publish_models(
             .collect(),
         selected: Some(game.catapult.selected().clone()),
     });
-    let mut choices = Vec::new();
-    if session.gauge().is_full() {
-        for (medal, level) in session.medals().owned() {
-            if level < MedalLevel::MAX {
-                choices.push(EvolutionChoice {
-                    evolution: Evolution::LevelUp(medal.clone()),
-                    result: medal.clone(),
-                    enabled: true,
-                });
-            }
-        }
-        for (a, b, result) in specs.fusions() {
-            if session.medals().level(a).is_some() && session.medals().level(b).is_some() {
-                choices.push(EvolutionChoice {
-                    evolution: Evolution::Fuse(a.clone(), b.clone()),
-                    result: result.clone(),
-                    enabled: session.medals().level(a) == Some(MedalLevel::MAX)
-                        && session.medals().level(b) == Some(MedalLevel::MAX)
-                        && session.medals().level(result).is_none(),
-                });
-            }
-        }
-        if let Some(medal) = session.evolution_offer() {
-            choices.push(EvolutionChoice {
-                evolution: Evolution::Acquire(medal.clone()),
-                result: medal.clone(),
-                enabled: true,
-            });
-        }
-    }
+    // 選択肢を作るのは進化の選択待ちの間だけ（毎フレームの確保を避ける）
+    let choices = if session.gauge().is_full() {
+        session.evolution_choices(&specs).collect()
+    } else {
+        Vec::new()
+    };
     evolution.set_if_neq(EvolutionModel(choices));
 }
 
 fn can_advance(game: Option<Res<ActiveGame>>) -> bool {
-    game.is_some_and(|game| {
-        game.session.status() == GameStatus::Playing && !game.session.gauge().is_full()
-    })
+    game.is_some_and(|game| game.session.ensure_running().is_ok())
 }
 
 fn resume_physics(mut time: ResMut<Time<Physics>>) {
@@ -659,15 +615,11 @@ fn accept_medal(
         let Request::SelectMedal(medal) = &request else {
             continue;
         };
-        let status = if game.session.status() != GameStatus::Playing
-            || game.session.gauge().is_full()
-        {
-            RequestStatus::Rejected(RejectReason::WrongState)
-        } else if game.session.medals().level(medal).is_some() {
-            game.catapult.select(medal.clone());
-            RequestStatus::Completed
-        } else {
-            RequestStatus::Rejected(RejectReason::Invalid(format!("medal is not owned: {medal}")))
+        let ActiveGame { session, catapult, .. } = &mut *game;
+        let status = match select_medal(session, catapult, medal.clone()) {
+            Ok(()) => RequestStatus::Completed,
+            Err(SelectMedalError::Session(_)) => RequestStatus::Rejected(RejectReason::WrongState),
+            Err(invalid) => RequestStatus::Rejected(RejectReason::Invalid(invalid.to_string())),
         };
         report([outcome(id, request, status)], &mut outcomes);
     }

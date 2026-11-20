@@ -10,6 +10,8 @@ pub struct Positive(f32);
 pub struct NotPositive(pub f32);
 
 impl Positive {
+    pub const ONE: Self = Self(1.0);
+
     pub fn new(value: f32) -> Result<Self, NotPositive> {
         if value.is_finite() && value > 0.0 {
             Ok(Self(value))

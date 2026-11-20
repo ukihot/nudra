@@ -3,9 +3,10 @@
 use std::collections::HashSet;
 
 use crate::{
+    ability::{AbilityRef, Effect, FiredAbility},
     difficulty::Difficulty,
     event::DomainEvent,
-    evolution::{Evolution, EvolutionError, EvolutionGauge, MedalCollection},
+    evolution::{Evolution, EvolutionChoice, EvolutionError, EvolutionGauge, MedalCollection},
     id::{
         BridgeId, EnemyId, EnemyTypeId, GameSessionId, GoalId, MedalId, PusherCharacterId, StageId,
     },
@@ -31,6 +32,8 @@ pub enum GameStatus {
 pub enum GameSessionError {
     #[error("session is not in progress ({0:?})")]
     NotPlaying(GameStatus),
+    #[error("waiting for the player to choose an evolution")]
+    EvolutionPending,
     #[error(transparent)]
     Evolution(#[from] EvolutionError),
 }
@@ -81,6 +84,8 @@ pub struct GameSession {
     rng: SessionRng,
     /// 進化画面で提示中の New!（ゲージが満タンになった時点で固定する）
     offer: Option<MedalId>,
+    /// 盤面で直前に発動した能力（デジャヴの再生に使う。再生を含む能力は記録しない）
+    last_ability: Option<AbilityRef>,
     /// 退場の二重判定を防ぐためのID集合。位置などの物理状態は持たない。
     alive_enemies: HashSet<EnemyId>,
     next_enemy_id: u64,
@@ -109,6 +114,7 @@ impl GameSession {
             gauge_points: rules.points_per_medal(difficulty),
             rng: SessionRng::seeded(seed),
             offer: None,
+            last_ability: None,
             alive_enemies: HashSet::new(),
             next_enemy_id: 1,
             defeated: 0,
@@ -156,6 +162,15 @@ impl GameSession {
         self.defeated
     }
 
+    /// ゲームが進行できる状態か（Playing で、進化の選択待ちでない）。射出・メダル選択・出現の前提。
+    pub fn ensure_running(&self) -> Result<(), GameSessionError> {
+        self.ensure_playing()?;
+        if self.gauge.is_full() {
+            return Err(GameSessionError::EvolutionPending);
+        }
+        Ok(())
+    }
+
     pub fn ensure_playing(&self) -> Result<(), GameSessionError> {
         match self.status {
             GameStatus::Playing => Ok(()),
@@ -163,10 +178,11 @@ impl GameSession {
         }
     }
 
-    /// 現在のTickまでに出現すべき敵（通常の敵と、終盤のボス）を出す。Playing以外では何もしない。
-    /// 前のWaveのボスを倒していたら、このTickから次のWaveを始める（出現時刻はこのTickからの相対）。
+    /// 現在のTickまでに出現すべき敵（通常の敵と、終盤のボス）を出す。進行できない間（終了後・
+    /// 進化の選択中）は何もしない。 前のWaveのボスを倒していたら、
+    /// このTickから次のWaveを始める（出現時刻はこのTickからの相対）。
     pub fn advance(&mut self, stage: &Stage, now: Tick) -> Vec<SpawnOrder> {
-        if self.ensure_playing().is_err() {
+        if self.ensure_running().is_err() {
             return Vec::new();
         }
         let waves = stage.wave_plan().waves();
@@ -281,17 +297,44 @@ impl GameSession {
     }
 
     /// 進化先が尽きたらゲージを溜めず、選べない進化画面による停止を防ぐ。
+    /// New! はゲージが満タンになった時点で決まるため、
+    /// ここでは「未所持の素材が残っているか」で見る。
     fn can_evolve(&self, specs: &SpecCatalog) -> bool {
-        self.medals
-            .owned()
-            .any(|(_, level)| level < crate::evolution::MedalLevel::MAX)
+        self.evolution_choices(specs).any(|c| c.available)
             || specs
                 .elements()
                 .any(|medal| self.medals.level(medal).is_none())
-            || specs.fusions().any(|(a, b, result)| {
-                self.medals.level(a) == Some(crate::evolution::MedalLevel::MAX)
-                    && self.medals.level(b) == Some(crate::evolution::MedalLevel::MAX)
-                    && self.medals.level(result).is_none()
+    }
+
+    /// 進化画面の選択肢（レベルアップ → 錬成 → New! の順）。可否は `evolve` と同じ検証で決める。
+    /// Lv.4 のレベルアップは出さない。錬成は素材を両方所持していれば、条件不足でも表示する。
+    pub fn evolution_choices<'a>(
+        &'a self,
+        specs: &'a SpecCatalog,
+    ) -> impl Iterator<Item = EvolutionChoice> + 'a {
+        let owned = |m: &MedalId| self.medals.level(m).is_some();
+        let level_ups = self
+            .medals
+            .owned()
+            .map(|(m, _)| Evolution::LevelUp(m.clone()));
+        let fusions = specs
+            .fusions()
+            .filter(move |(a, b, _)| owned(a) && owned(b))
+            .map(|(a, b, _)| Evolution::Fuse(a.clone(), b.clone()));
+        let offer = self.offer.iter().cloned().map(Evolution::Acquire);
+        level_ups
+            .chain(fusions)
+            .chain(offer)
+            .filter_map(move |evolution| {
+                let checked =
+                    self.medals
+                        .check(&evolution, |a, b| specs.fusion(a, b), self.offer.as_ref());
+                let (result, available) = match (&evolution, checked) {
+                    (_, Ok(evolved)) => (evolved.medal, true),
+                    (Evolution::Fuse(a, b), Err(_)) => (specs.fusion(a, b)?, false),
+                    (_, Err(_)) => return None,
+                };
+                Some(EvolutionChoice { evolution, result, available })
             })
     }
 
@@ -312,6 +355,30 @@ impl GameSession {
         self.gauge.reset();
         self.offer = None;
         Ok(DomainEvent::Evolved { medal: evolved.medal, level: evolved.level })
+    }
+
+    /// 能力の発動。実行する能力を返し、盤面で直前に発動した能力として記録する。
+    /// 再生（[`Effect::Replay`]）を含む能力は記録せず、直前の能力を `replayed` に入れて返す。
+    /// 進行できない間（終了後・進化の選択中）と、定義に無い能力は `None`（何も記録しない）。
+    pub fn fire_ability<'a>(
+        &mut self,
+        fired: &AbilityRef,
+        specs: &'a SpecCatalog,
+    ) -> Option<FiredAbility<'a>> {
+        self.ensure_running().ok()?;
+        let book = specs.abilities();
+        let ability = book
+            .abilities(&fired.medal, fired.level)
+            .get(fired.index)?;
+        if ability.effects.contains(&Effect::Replay) {
+            let replayed = self
+                .last_ability
+                .as_ref()
+                .and_then(|last| book.abilities(&last.medal, last.level).get(last.index));
+            return Some(FiredAbility { ability, replayed });
+        }
+        self.last_ability = Some(fired.clone());
+        Some(FiredAbility { ability, replayed: None })
     }
 
     /// 所持しているメダル種の、今のレベルでの物理特性。所持していなければ `None`。
@@ -857,6 +924,222 @@ mod tests {
         assert!(session.medals_fell(100, &catalog).is_empty());
     }
 
+    // ── 能力の発動と再生 ──
+
+    /// fire: 接触で爆風（Lv.2 は倍率2）。water: 直前の能力を再生する。
+    fn ability_catalog() -> SpecCatalog {
+        use crate::{
+            ability::{AbilityDef, Area, CollideWith, Direction, Target, Trigger},
+            spec::abilities::MedalAbilities,
+        };
+        let blast = AbilityDef {
+            on: Trigger::Collide(CollideWith::Any),
+            target: Target::Both,
+            area: Area::Radius(p(1.0)),
+            effects: vec![Effect::Push { dir: Direction::Outward, strength: p(2.0) }],
+            uses: None,
+        };
+        let replay = AbilityDef { effects: vec![Effect::Replay], ..blast.clone() };
+        let mut parts = spec_parts();
+        parts.abilities.scale = [p(1.0), p(2.0), p(1.0), p(1.0)];
+        parts.abilities.medals = std::collections::BTreeMap::from([
+            (fire(), MedalAbilities { base: vec![blast], awaken: vec![] }),
+            (water(), MedalAbilities { base: vec![replay], awaken: vec![] }),
+        ]);
+        SpecCatalog::new(parts).expect("valid")
+    }
+
+    fn fired(medal: MedalId, level: u8) -> AbilityRef {
+        AbilityRef { medal, level: lv(level), index: 0 }
+    }
+
+    fn strength(ability: &crate::ability::AbilityDef) -> f32 {
+        match ability.effects[0] {
+            Effect::Push { strength, .. } => strength.get(),
+            _ => panic!("not a push"),
+        }
+    }
+
+    #[rstest]
+    fn an_ability_fires_without_replaying(started: (GameSession, Stage)) {
+        let (mut session, _) = started;
+        let specs = ability_catalog();
+        let out = session
+            .fire_ability(&fired(fire(), 1), &specs)
+            .expect("fired");
+        assert_eq!(strength(out.ability), 2.0);
+        assert_eq!(out.replayed, None);
+    }
+
+    #[rstest]
+    fn replay_fires_the_last_ability_at_its_level(started: (GameSession, Stage)) {
+        let (mut session, _) = started;
+        let specs = ability_catalog();
+        session.fire_ability(&fired(fire(), 2), &specs);
+        let out = session
+            .fire_ability(&fired(water(), 1), &specs)
+            .expect("fired");
+        assert_eq!(out.ability.effects, [Effect::Replay]);
+        assert_eq!(out.replayed.map(strength), Some(4.0), "the level 2 blast");
+    }
+
+    #[rstest]
+    fn replay_with_nothing_before_replays_nothing(started: (GameSession, Stage)) {
+        let (mut session, _) = started;
+        let specs = ability_catalog();
+        let out = session
+            .fire_ability(&fired(water(), 1), &specs)
+            .expect("fired");
+        assert_eq!(out.replayed, None);
+    }
+
+    /// 再生を記録すると、再生が再生を呼び続ける。
+    #[rstest]
+    fn a_replay_is_not_recorded(started: (GameSession, Stage)) {
+        let (mut session, _) = started;
+        let specs = ability_catalog();
+        session.fire_ability(&fired(fire(), 1), &specs);
+        session.fire_ability(&fired(water(), 1), &specs);
+        let again = session
+            .fire_ability(&fired(water(), 1), &specs)
+            .expect("fired");
+        assert_eq!(again.replayed.map(strength), Some(2.0), "still the blast");
+    }
+
+    #[rstest]
+    fn an_undefined_ability_fires_nothing_and_is_not_recorded(started: (GameSession, Stage)) {
+        let (mut session, _) = started;
+        let specs = ability_catalog();
+        session.fire_ability(&fired(fire(), 1), &specs);
+        let unknown = AbilityRef { index: 5, ..fired(fire(), 1) };
+        assert_eq!(session.fire_ability(&unknown, &specs), None);
+        assert_eq!(session.fire_ability(&fired(sauna(), 1), &specs), None);
+        let out = session
+            .fire_ability(&fired(water(), 1), &specs)
+            .expect("fired");
+        assert_eq!(out.replayed.map(strength), Some(2.0));
+    }
+
+    #[rstest]
+    fn no_ability_fires_while_an_evolution_is_pending_or_after_the_game(
+        started: (GameSession, Stage),
+    ) {
+        let (mut session, stage) = started;
+        let specs = ability_catalog();
+        session.medals_fell(10, &specs);
+        assert_eq!(session.fire_ability(&fired(fire(), 1), &specs), None);
+        session
+            .evolve(Evolution::LevelUp(MedalId::normal()), &specs)
+            .expect("level up");
+        let enemy = session.advance(&stage, Tick(0))[0].enemy;
+        session.enemy_reached_goal(enemy, GoalId(1));
+        assert_eq!(session.fire_ability(&fired(fire(), 1), &specs), None);
+        assert_eq!(session.last_ability, None, "nothing was recorded");
+    }
+
+    // ── 進行できる状態 ──
+
+    #[rstest]
+    fn running_until_the_gauge_fills(started: (GameSession, Stage), catalog: SpecCatalog) {
+        let (mut session, _) = started;
+        assert_eq!(session.ensure_running(), Ok(()));
+        session.medals_fell(10, &catalog);
+        assert_eq!(session.ensure_running(), Err(GameSessionError::EvolutionPending));
+        session
+            .evolve(Evolution::LevelUp(MedalId::normal()), &catalog)
+            .expect("level up");
+        assert_eq!(session.ensure_running(), Ok(()));
+    }
+
+    #[rstest]
+    fn not_running_after_the_game_ends(started: (GameSession, Stage)) {
+        let (mut session, stage) = started;
+        let enemy = session.advance(&stage, Tick(0))[0].enemy;
+        session.enemy_reached_goal(enemy, GoalId(1));
+        assert_eq!(
+            session.ensure_running(),
+            Err(GameSessionError::NotPlaying(session.status()))
+        );
+    }
+
+    /// 進化の選択中は敵が出ない。選んだ後に、溜まっていた出現をまとめて出す。
+    #[rstest]
+    fn no_spawns_while_an_evolution_is_pending(
+        started: (GameSession, Stage),
+        catalog: SpecCatalog,
+    ) {
+        let (mut session, stage) = started;
+        session.medals_fell(10, &catalog);
+        assert!(session.advance(&stage, Tick(60)).is_empty());
+        session
+            .evolve(Evolution::LevelUp(MedalId::normal()), &catalog)
+            .expect("level up");
+        assert_eq!(ids(&session.advance(&stage, Tick(60))), [1, 2]);
+    }
+
+    // ── 進化画面の選択肢 ──
+
+    fn choices(session: &GameSession, catalog: &SpecCatalog) -> Vec<(Evolution, MedalId, bool)> {
+        session
+            .evolution_choices(catalog)
+            .map(|c| (c.evolution, c.result, c.available))
+            .collect()
+    }
+
+    #[rstest]
+    fn choices_list_level_ups_and_the_new_medal(
+        started: (GameSession, Stage),
+        catalog: SpecCatalog,
+    ) {
+        let (mut session, _) = started;
+        let offer = fill(&mut session, &catalog).expect("offered");
+        assert_eq!(
+            choices(&session, &catalog),
+            [
+                (Evolution::LevelUp(MedalId::normal()), MedalId::normal(), true),
+                (Evolution::Acquire(offer.clone()), offer, true),
+            ]
+        );
+    }
+
+    #[rstest]
+    fn fusion_below_max_level_is_shown_but_unavailable(
+        started: (GameSession, Stage),
+        catalog: SpecCatalog,
+    ) {
+        let (mut session, _) = started;
+        for _ in 0..2 {
+            let offer = fill(&mut session, &catalog).expect("offered");
+            session
+                .evolve(Evolution::Acquire(offer), &catalog)
+                .expect("acquire");
+        }
+        fill(&mut session, &catalog);
+        let all = choices(&session, &catalog);
+        assert!(all.contains(&(Evolution::Fuse(fire(), water()), sauna(), false)));
+        assert_eq!(
+            all.iter().filter(|(.., available)| *available).count(),
+            3,
+            "level up of normal, fire and water"
+        );
+    }
+
+    /// 錬成・New! を含め、試し得るすべての進化。錬成は順序を問わないため、素材の組は a ≦ b
+    /// の正規順だけを並べる（逆順は同じ選択肢）。
+    fn every_evolution() -> Vec<Evolution> {
+        let medals = [MedalId::normal(), fire(), water(), sauna()];
+        let mut all: Vec<_> = medals
+            .iter()
+            .flat_map(|m| [Evolution::LevelUp(m.clone()), Evolution::Acquire(m.clone())])
+            .collect();
+        for a in &medals {
+            for b in medals.iter().filter(|b| a <= *b) {
+                all.push(Evolution::Fuse(a.clone(), b.clone()));
+            }
+        }
+        all
+    }
+
     #[derive(Debug, Clone)]
     enum Op {
         Fell(u64),
@@ -868,6 +1151,7 @@ mod tests {
             prop_oneof![Just(MedalId::normal()), Just(fire()), Just(water()), Just(sauna())];
         prop_oneof![
             medal.clone().prop_map(Evolution::LevelUp),
+            medal.clone().prop_map(Evolution::Acquire),
             (medal.clone(), medal).prop_map(|(a, b)| Evolution::Fuse(a, b)),
         ]
     }
@@ -908,6 +1192,26 @@ mod tests {
                 } else {
                     prop_assert!(!session.gauge().is_full());
                 }
+            }
+        }
+
+        /// 選べると示した進化は必ず成功し、成功する進化は必ず選べると示す（判定の二重化をしない）。
+        #[test]
+        fn choices_match_what_evolve_accepts(evolutions in prop::collection::vec(evolution(), 0..40)) {
+            let catalog = SpecCatalog::new(spec_parts()).expect("valid");
+            let (mut session, _) = started(stage(parts()));
+            for evolution in evolutions {
+                session.medals_fell(10, &catalog);
+                let available: Vec<_> = session
+                    .evolution_choices(&catalog)
+                    .filter(|c| c.available)
+                    .map(|c| c.evolution)
+                    .collect();
+                for candidate in every_evolution() {
+                    let accepted = session.clone().evolve(candidate.clone(), &catalog).is_ok();
+                    prop_assert_eq!(accepted, available.contains(&candidate), "{:?}", candidate);
+                }
+                let _ = session.evolve(evolution, &catalog);
             }
         }
     }

@@ -392,6 +392,8 @@ impl SpecsAsset {
                 threshold: self.evolution.threshold,
                 points_per_medal: self.evolution.points_per_medal,
             },
+            // 【未実装】能力の定義データは次の段階で読み込む（基本設計 3.14）
+            abilities: Default::default(),
         })?)
     }
 }

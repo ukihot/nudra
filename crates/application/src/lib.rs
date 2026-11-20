@@ -5,6 +5,7 @@ mod evolve;
 mod launch_medal;
 mod progress;
 mod resolve;
+mod select_medal;
 mod start_game;
 mod waves;
 
@@ -14,7 +15,10 @@ pub use progress::{
     ProgressStoreError, RecordResultError, load_progress, record_result, save_progress,
 };
 pub use resolve::{PhysicsFact, resolve_physics};
-pub use start_game::{PusherSetup, StartGameCommand, StartGameError, StartGameOutput, start_game};
+pub use select_medal::{SelectMedalError, select_medal};
+pub use start_game::{
+    PusherSetup, StartGameCommand, StartGameError, StartGameOutput, check_start, start_game,
+};
 pub use waves::{WaveOutput, advance_waves};
 
 #[cfg(test)]

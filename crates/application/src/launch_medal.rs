@@ -20,7 +20,7 @@ pub struct LaunchOutput {
     pub event: DomainEvent,
 }
 
-/// 発射の前提が崩れている場合（終了後のセッション、所持していないメダル種）。
+/// 発射の前提が崩れている場合（終了後・進化の選択中のセッション、所持していないメダル種）。
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum LaunchMedalError {
     #[error(transparent)]
@@ -36,7 +36,7 @@ pub fn launch_medal(
     specs: &SpecCatalog,
     now: Tick,
 ) -> Result<Option<LaunchOutput>, LaunchMedalError> {
-    session.ensure_playing()?;
+    session.ensure_running()?;
     let medal = state.selected().clone();
     let spec = session
         .medal_spec(&medal, specs)
@@ -116,6 +116,22 @@ mod tests {
         );
         assert_eq!(state, before, "the fire interval must not start");
         assert_eq!(enemy, EnemyId(1));
+    }
+
+    #[rstest]
+    fn no_launch_while_an_evolution_is_pending(
+        mut session: GameSession,
+        stage: Stage,
+        specs: SpecCatalog,
+    ) {
+        session.medals_fell(1, &specs);
+        let mut state = CatapultState::new(stage.catapult());
+        let before = state.clone();
+        assert_eq!(
+            launch_medal(&session, &stage, &mut state, &specs, Tick(0)),
+            Err(LaunchMedalError::Session(GameSessionError::EvolutionPending))
+        );
+        assert_eq!(state, before);
     }
 
     #[rstest]

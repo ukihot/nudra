@@ -302,7 +302,7 @@ fn collect_stage_nodes(
 
 - **Houdini / ステージGLB**：形状と初期配置の正本。再配置はSOPの配置用Transformから行い、ステージ全体を再出力します。
 - **ステージ設定**：GLBのパス、ノード名と設備IDの対応、寸法・判定・ゲームルール。GLB接続後は同じ設備の初期位置・回転を別途手入力して二重管理しません。
-- **Presentation / Infrastructure**：展開済みノードとTransformを`game/src/port.rs`の境界経由で共有し、表示と物理・ゲーム設定を接続します。互いの実装を直接参照しません。
+- **Presentation / Infrastructure**：展開済みノードとTransformを`game/src/port`の境界経由で共有し、表示と物理・ゲーム設定を接続します。互いの実装を直接参照しません。
 - **Domain / Application**：BevyのEntity・Handle・GLBへ依存せず、変換・検証済みのゲーム用の値を受け取ります。ゲーム中の位置・速度はECS / Avianを正本とします。
 
 現行ステージは接続実装が完了するまで従来の定義で動作します。GLBを採用するステージは読み込み・検証成功を開始条件とし、欠落時は原因を表示します。

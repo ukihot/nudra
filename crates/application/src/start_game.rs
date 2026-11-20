@@ -5,6 +5,7 @@ use domain::{
     event::DomainEvent,
     id::{GameSessionId, PusherCharacterId, RailId, StageId},
     math::Vec3,
+    progress::{PlayerProgress, ProgressError},
     pusher::{MovementState, PusherCharacter, PusherStats},
     repository::{PusherCharacterRepository, StageRepository},
     session::GameSession,
@@ -45,6 +46,27 @@ pub enum StartGameError {
     StageNotFound(StageId),
     #[error("pusher character not found: {0}")]
     CharacterNotFound(PusherCharacterId),
+    #[error(transparent)]
+    Progress(#[from] ProgressError),
+}
+
+/// 開始の指図の受付検証。実行段階（`start_game`）に失敗し得る条件を残さないよう、受付時に済ませる。
+/// ステージ → キャラクター → 難易度の解放、の順に調べ、最初の失敗を返す。
+pub fn check_start(
+    stages: &impl StageRepository,
+    characters: &impl PusherCharacterRepository,
+    progress: &PlayerProgress,
+    stage: &StageId,
+    character: &PusherCharacterId,
+    difficulty: Difficulty,
+) -> Result<(), StartGameError> {
+    if stages.find(stage).is_none() {
+        return Err(StartGameError::StageNotFound(stage.clone()));
+    }
+    if characters.find(character).is_none() {
+        return Err(StartGameError::CharacterNotFound(character.clone()));
+    }
+    Ok(progress.ensure_unlocked(stage, difficulty)?)
 }
 
 pub fn start_game(
@@ -174,6 +196,74 @@ mod tests {
             )
             .err(),
             Some(StartGameError::CharacterNotFound(PusherCharacterId::new(
+                "mop_rabbit"
+            )))
+        );
+    }
+
+    // ── 受付検証 ──
+
+    fn check(
+        stages: &MockStages,
+        characters: &MockCharacters,
+        difficulty: Difficulty,
+    ) -> Result<(), StartGameError> {
+        check_start(
+            stages,
+            characters,
+            &PlayerProgress::default(),
+            &StageId::new("stage_01"),
+            &PusherCharacterId::new("mop_rabbit"),
+            difficulty,
+        )
+    }
+
+    #[rstest]
+    fn start_on_an_unlocked_difficulty_is_accepted(stage: Stage, character: PusherCharacter) {
+        assert_eq!(
+            check(
+                &stages_returning(Some(stage)),
+                &characters_returning(Some(character)),
+                Difficulty::EASY
+            ),
+            Ok(())
+        );
+    }
+
+    #[rstest]
+    fn start_on_a_locked_difficulty_is_rejected(stage: Stage, character: PusherCharacter) {
+        assert_eq!(
+            check(
+                &stages_returning(Some(stage)),
+                &characters_returning(Some(character)),
+                Difficulty::HARDEST
+            ),
+            Err(StartGameError::Progress(ProgressError::LockedDifficulty {
+                stage: StageId::new("stage_01"),
+                requested: Difficulty::HARDEST,
+            }))
+        );
+    }
+
+    #[rstest]
+    fn start_with_an_unknown_stage_is_rejected_without_loading_character() {
+        let mut characters = MockCharacters::new();
+        characters.expect_find().never();
+        assert_eq!(
+            check(&stages_returning(None), &characters, Difficulty::EASY),
+            Err(StartGameError::StageNotFound(StageId::new("stage_01")))
+        );
+    }
+
+    #[rstest]
+    fn start_with_an_unknown_character_is_rejected(stage: Stage) {
+        assert_eq!(
+            check(
+                &stages_returning(Some(stage)),
+                &characters_returning(None),
+                Difficulty::EASY
+            ),
+            Err(StartGameError::CharacterNotFound(PusherCharacterId::new(
                 "mop_rabbit"
             )))
         );

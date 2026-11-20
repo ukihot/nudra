@@ -36,7 +36,7 @@ macro_rules! number_id {
     )*};
 }
 
-string_id!(StageId, PusherCharacterId, EnemyTypeId);
+string_id!(StageId, PusherCharacterId, EnemyTypeId, MarkId);
 number_id!(
     GoalId(u16),
     BridgeId(u16),
