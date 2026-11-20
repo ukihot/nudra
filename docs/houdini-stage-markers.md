@@ -1,5 +1,7 @@
 # Nudra：Houdini 22でステージを作り、Bevyへ配置を渡すワークフロー
 
+> **2026-11-20 置き換え**: 制作ツールは Blender 5.3 に変更した。現行の手順は [Blender制作ワークフロー](blender-asset-pipeline.md)。本書は命名・原点・モデル一覧の参考として残す。
+
 - 方針：**Houdiniをステージエディタとして使い、形状と初期配置を1つのステージGLBへ書き出す。**
 - 対象：Houdini 22の新しいglTF 2.0入出力、Bevy 0.20（API確認は0.20.1）
 - 関連：[アセット制作依頼書](houdini-asset-brief.md)、[基本設計](basic-design.md)

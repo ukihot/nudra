@@ -220,7 +220,7 @@ fn definition_data_loads_into_character_select() {
     let app = loaded();
     let roster = app.world().resource::<CharacterRoster>();
     let ids: Vec<_> = roster.0.iter().map(|e| e.id.as_str()).collect();
-    assert_eq!(ids, ["iron_bear", "mop_rabbit"]);
+    assert_eq!(ids, ["ao_umiushi", "iron_bear", "mop_rabbit"]);
 }
 
 #[test]

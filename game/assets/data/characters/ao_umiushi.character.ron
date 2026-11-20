@@ -1,0 +1,2 @@
+// アオウミウシ: 青い体に黄色い縞、橙の触角とえら。レールの上を幅広く這い、外套膜のフリルでメダルを押し崩す。
+(id: "ao_umiushi", name: "Ao Umiushi", speed: 2.0, mass: 30.0, push_force: 700.0, push_width: 1.8, pause_at_ends: 0.4)

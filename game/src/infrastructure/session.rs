@@ -19,7 +19,8 @@ use avian3d::prelude::{Forces, Physics, PhysicsTime};
 use bevy::prelude::{
     App, Commands, DetectChangesMut, Entity, FixedUpdate, In, IntoScheduleConfigs, IntoSystem,
     Last, MessageReader, MessageWriter, NextState, OnEnter, OnExit, Query, Res, ResMut, Resource,
-    State, SystemSet, Time, Update, debug, error, in_state, info, resource_exists, warn,
+    State, SystemSet, Time, Transform, Update, With, debug, error, in_state, info, resource_exists,
+    warn,
 };
 use domain::{
     ability::Happening,
@@ -45,7 +46,7 @@ use super::{
     physics::{self, KILL_DEPTH, KillPlane, PendingFacts},
     progress::{Progress, SaveJob},
     requests::{RequestKind, RequestLedger, outcome},
-    world::{self, Enemy, Pusher, PusherMotion},
+    world::{self, CatapultChute, Enemy, Pusher, PusherMotion},
 };
 use crate::{
     port::{
@@ -192,7 +193,10 @@ pub(super) fn plugin(app: &mut App) {
                 decide_phase.in_set(Phase),
             ),
         )
-        .add_systems(Update, publish_models.run_if(resource_exists::<ActiveGame>));
+        .add_systems(
+            Update,
+            (publish_models, aim_chute).run_if(resource_exists::<ActiveGame>),
+        );
 }
 
 // ── 指図 ──────────────────────────────────────────────────
@@ -666,6 +670,14 @@ fn advance_clock(mut clock: ResMut<GameClock>) {
 }
 
 // ── 読み取りモデル ────────────────────────────────────────
+
+/// カタパルトのシュートを今の旋回角へ向ける（見た目のみ）。
+fn aim_chute(game: Res<ActiveGame>, mut chutes: Query<&mut Transform, With<CatapultChute>>) {
+    let rotation = world::chute_rotation(game.stage.catapult().direction(game.catapult.yaw()));
+    for mut transform in &mut chutes {
+        transform.set_if_neq(transform.with_rotation(rotation));
+    }
+}
 
 fn publish_models(
     game: Res<ActiveGame>,

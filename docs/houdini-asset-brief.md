@@ -1,5 +1,7 @@
 # NUDRA アセット制作依頼書 / Houdini 22・Copernicus
 
+> **2026-11-20 置き換え**: 制作ツールは Blender 5.3 に変更した。現行の手順は [Blender制作ワークフロー](blender-asset-pipeline.md)。本書は命名・原点・モデル一覧の参考として残す。
+
 - 作成日: 2026-11-19
 - 対象: Houdini 22で制作するゲーム用3Dモデル、テクスチャ、メダル図鑑画像、ウミウシ型キャラのサムネイル、メニューUI素材、エフェクト用画像
 - 参照: [要件定義](requirements.md)、[基本設計](basic-design.md)、[錬成表](medal-fusions.csv)

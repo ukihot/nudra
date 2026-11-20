@@ -2,13 +2,15 @@
 (
     id: "stage_01",
     geometry: (shape: Rectangle(width: 8.0, depth: 16.0), floor_y: 0.0),
+    // カタパルトは盤面の右外に立ち、横（-X）からメダルを転がし入れる（基本設計 5.8）。
+    // 旋回の範囲で、奥（橋の出口の手前）からPusherの前までへ垂らせる。
     catapult: (
-        position: (0.0, 0.6, 5.8),
-        base_yaw_deg: 0.0,
+        position: (4.4, 0.85, -4.5),
+        base_yaw_deg: 90.0,
         initial_yaw_deg: 0.0,
-        yaw_range_deg: (-40.0, 40.0),
-        pitch_deg: 12.0,
-        speed: 14.0,
+        yaw_range_deg: (-35.0, 35.0),
+        pitch_deg: -6.0,
+        speed: 4.5,
         fire_interval_ms: 250,
     ),
     bridges: [

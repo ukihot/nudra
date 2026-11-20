@@ -86,7 +86,8 @@ const FLOOR_THICKNESS: f32 = 0.5;
 const GOAL_HEIGHT: f32 = 2.0;
 const PUSHER_HEIGHT: f32 = 0.8;
 const PUSHER_THICKNESS: f32 = 0.5;
-const CATAPULT_SIZE: Vec3 = Vec3::new(1.2, 0.6, 1.2);
+/// 仮形状のシュート（幅・高さ・長さ）。射出口から後ろへ伸びる
+const CHUTE_SIZE: Vec3 = Vec3::new(0.3, 0.3, 1.3);
 
 pub(super) fn in_game() -> DespawnOnExit<AppState> {
     DespawnOnExit(AppState::InGame)
@@ -181,12 +182,32 @@ pub fn spawn_stage(commands: &mut Commands, stage: &Stage, difficulty: Difficult
         ));
     }
 
-    // カタパルトは表示のみ（射出したメダルと干渉させない）
+    // カタパルトは表示のみ（射出したメダルと干渉させない）。原点はどちらも旋回軸＝射出口。
+    // 台座は固定、シュートは旋回に合わせて向きを変える（`aim_chute`）。
+    let muzzle = stage.catapult().position();
     commands.spawn((
-        Appearance::new("catapult", Silhouette::Cuboid { size: CATAPULT_SIZE }),
-        Transform::from_translation(stage.catapult().position() - Vec3::Y * CATAPULT_SIZE.y),
+        Appearance::new("catapult/base", Silhouette::Cylinder { radius: 0.3, height: 0.1 }),
+        Transform::from_translation(muzzle),
         in_game(),
     ));
+    commands.spawn((
+        CatapultChute,
+        Appearance::new("catapult/chute", Silhouette::Cuboid { size: CHUTE_SIZE }),
+        Transform::from_translation(muzzle),
+        in_game(),
+    ));
+}
+
+/// カタパルトの旋回するシュート（見た目）。
+#[derive(Component, Debug, Clone, Copy)]
+pub struct CatapultChute;
+
+/// シュートの向き: 射出方向の水平成分を前（-Z）にする。傾きはモデルが持つ。
+#[must_use]
+pub fn chute_rotation(direction: Vec3) -> Quat {
+    Transform::IDENTITY
+        .looking_to(Vec3::new(direction.x, 0.0, direction.z), Vec3::Y)
+        .rotation
 }
 
 /// メダルの物理特性（定義の値に印の効き目を掛けたもの）。
@@ -330,4 +351,23 @@ pub fn spawn_pusher(
             .with_rotation(Quat::from_rotation_arc(Vec3::X, heading)),
         in_game(),
     ));
+}
+
+#[cfg(test)]
+mod tests {
+    use rstest::rstest;
+
+    use super::*;
+
+    /// シュートの前（-Z）は射出方向の水平成分を向き、傾かない。
+    #[rstest]
+    #[case::left(Vec3::new(-1.0, -0.1, 0.0))]
+    #[case::left_near(Vec3::new(-0.8, -0.1, 0.57))]
+    #[case::left_far(Vec3::new(-0.8, 0.2, -0.57))]
+    fn the_chute_faces_the_launch_direction_on_the_ground(#[case] direction: Vec3) {
+        let rotation = chute_rotation(direction);
+        let flat = Vec3::new(direction.x, 0.0, direction.z).normalize();
+        assert!((rotation * Vec3::NEG_Z).distance(flat) < 1e-5);
+        assert!((rotation * Vec3::Y).distance(Vec3::Y) < 1e-5);
+    }
 }

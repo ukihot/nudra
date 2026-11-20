@@ -27,7 +27,7 @@ use domain::{
     ability::{Area, Direction, Effect, Happening, Partner, SpawnAt, Target, Trigger},
     firing::triggered,
     motion::{MedalMotion, Motion, MotionRules, MotionSample},
-    spec::SpecCatalog,
+    spec::{MedalSpec, SpecCatalog},
     stage::{Shape, Stage},
     time::{Tick, Ticks},
     unit::{MedalExitReason, MedalUnit},
@@ -236,6 +236,38 @@ fn forward(velocity: Vec3) -> Vec3 {
     Vec3::new(velocity.x, 0.0, velocity.z).normalize_or(Vec3::NEG_Z)
 }
 
+/// カタパルトは横からメダルを転がす（基本設計 5.8）。水平に動いていれば、縁で立てて
+/// （円柱の軸を進行方向の横へ）滑らずに転がる角速度を与える。止まっていれば寝かせたまま。
+fn rolling(velocity: Vec3, radius: f32) -> (Quat, Vec3) {
+    let flat = Vec3::new(velocity.x, 0.0, velocity.z);
+    match flat.try_normalize() {
+        Some(dir) => (
+            Quat::from_rotation_arc(Vec3::Y, Vec3::Y.cross(dir)),
+            Vec3::Y.cross(flat) / radius,
+        ),
+        None => (Quat::IDENTITY, Vec3::ZERO),
+    }
+}
+
+/// 生成するメダルの描画用Transformと物理の初期状態（位置・姿勢・速度）。
+/// Avianが古いTransformから戻さないように両方をそろえる。
+fn entry(
+    position: Vec3,
+    velocity: Vec3,
+    spec: &MedalSpec,
+) -> (Transform, (Position, Rotation, LinearVelocity, AngularVelocity)) {
+    let (rotation, spin) = rolling(velocity, spec.radius.get());
+    (
+        Transform::from_translation(position).with_rotation(rotation),
+        (
+            Position(position),
+            Rotation(rotation),
+            LinearVelocity(velocity),
+            AngularVelocity(spin),
+        ),
+    )
+}
+
 /// 水平位置が盤面の上か（盤面の中心は原点）。
 fn on_board(stage: &Stage, p: Vec3) -> bool {
     match stage.geometry().shape {
@@ -247,13 +279,19 @@ fn on_board(stage: &Stage, p: Vec3) -> bool {
 }
 
 /// 生成・復活の位置。`Here` は水平位置の真上の安全な高さ、`Sky` は上空。
-/// 盤面の外（奈落の上など、足場のない位置）ならカタパルトへ（基本設計 3.18）。
-fn spawn_point(at: SpawnAt, here: Vec3, stage: &Stage) -> Vec3 {
+/// 盤面の外（奈落の上など、足場のない位置）ならカタパルトへ戻し、今の向き `yaw` で転がし出す
+/// （基本設計 3.18。カタパルトの口は盤面の外にあるので、止めて置くと奈落へ落ちる）。
+/// 戻り値は（位置, 速度）。
+fn spawn_point(at: SpawnAt, here: Vec3, stage: &Stage, yaw: f32) -> (Vec3, Vec3) {
     let floor = stage.geometry().floor_y;
     match at {
-        SpawnAt::Here if on_board(stage, here) => Vec3::new(here.x, floor + SAFE_HEIGHT, here.z),
-        SpawnAt::Sky if on_board(stage, here) => Vec3::new(here.x, floor + SKY_HEIGHT, here.z),
-        _ => stage.catapult().position(),
+        SpawnAt::Here if on_board(stage, here) => {
+            (Vec3::new(here.x, floor + SAFE_HEIGHT, here.z), Vec3::ZERO)
+        },
+        SpawnAt::Sky if on_board(stage, here) => {
+            (Vec3::new(here.x, floor + SKY_HEIGHT, here.z), Vec3::ZERO)
+        },
+        _ => (stage.catapult().position(), stage.catapult().launch_velocity(yaw)),
     }
 }
 
@@ -332,17 +370,11 @@ pub fn spawn_medal(
     let spec = specs.medal(unit.medal(), unit.level()).copied()?;
     let timers = AbilityTimers::new(specs, &unit, now);
     let modifiers = unit.modifiers(specs.abilities());
+    let (transform, physics) = entry(position, velocity, &spec);
     let entity = commands
         .spawn((
-            medal_bundle(
-                unit,
-                &spec,
-                &modifiers,
-                Transform::from_translation(position),
-                MedalMotion::launched(),
-            ),
-            Position(position),
-            LinearVelocity(velocity),
+            medal_bundle(unit, &spec, &modifiers, transform, MedalMotion::launched()),
+            physics,
             CollisionEventsEnabled,
         ))
         .id();
@@ -365,7 +397,7 @@ fn spawn_child(
     world: &mut World,
     specs: &SpecCatalog,
     unit: MedalUnit,
-    position: Vec3,
+    (position, velocity): (Vec3, Vec3),
     now: Tick,
     next: &mut Vec<AbilityEvent>,
 ) {
@@ -374,17 +406,11 @@ fn spawn_child(
     };
     let timers = AbilityTimers::new(specs, &unit, now);
     let modifiers = unit.modifiers(specs.abilities());
+    let (transform, physics) = entry(position, velocity, &spec);
     let entity = world
         .spawn((
-            medal_bundle(
-                unit,
-                &spec,
-                &modifiers,
-                Transform::from_translation(position),
-                MedalMotion::launched(),
-            ),
-            Position(position),
-            LinearVelocity::ZERO,
+            medal_bundle(unit, &spec, &modifiers, transform, MedalMotion::launched()),
+            physics,
             CollisionEventsEnabled,
         ))
         .id();
@@ -536,7 +562,8 @@ fn apply_to_medal(
                 let half = world.get::<Medal>(target).map(|m| m.0.split_off());
                 let position = world.get::<Position>(target).map(|p| p.0);
                 if let (Some(half), Some(position)) = (half, position) {
-                    spawn_child(world, specs, half, position + Vec3::Y * 0.2, now, next);
+                    let at = (position + Vec3::Y * 0.2, Vec3::ZERO);
+                    spawn_child(world, specs, half, at, now, next);
                 }
             },
             EffectOrder::Transform { medal, level } => {
@@ -705,8 +732,9 @@ fn try_commit_one(
                             child.conditions_mut().apply(def, None);
                         }
                         let offset = Vec3::X * SPAWN_SPACING * f32::from(i);
-                        let position = spawn_point(*at, ev.at, &game.stage) + offset;
-                        spawn_child(world, specs, child, position, now, next);
+                        let (position, velocity) =
+                            spawn_point(*at, ev.at, &game.stage, game.catapult.yaw());
+                        spawn_child(world, specs, child, (position + offset, velocity), now, next);
                     }
                 },
                 _ => {},
@@ -834,15 +862,19 @@ pub fn resolve_falls(world: &mut World) {
             }
             match revive {
                 Some(to) => {
-                    // 位置・描画用Transform・
-                    // 速度をそろえて戻す（Avianが古いTransformから位置を戻さないように）
-                    let to = spawn_point(to, at, &game.stage);
-                    world.entity_mut(entity).insert((
-                        Position(to),
-                        Transform::from_translation(to),
-                        LinearVelocity::ZERO,
-                        CollisionEventsEnabled,
-                    ));
+                    // 位置・姿勢・速度を描画用Transformとそろえて戻す
+                    let (to, velocity) = spawn_point(to, at, &game.stage, game.catapult.yaw());
+                    let spec = world
+                        .get::<Medal>(entity)
+                        .and_then(|m| specs.medal(m.0.medal(), m.0.level()).copied());
+                    if let Some(spec) = spec {
+                        let (transform, physics) = entry(to, velocity, &spec);
+                        world.entity_mut(entity).insert((
+                            transform,
+                            physics,
+                            CollisionEventsEnabled,
+                        ));
+                    }
                     if let Some(mut motion) = world.get_mut::<MedalMotionState>(entity) {
                         motion.0.lift();
                     }
@@ -1237,7 +1269,7 @@ mod tests {
     use super::*;
     use crate::infrastructure::data::StageAsset;
 
-    /// stage_01: 幅8m・奥行16mの長方形、床の高さ0、カタパルトは (0, 0.6, 5.8)。
+    /// stage_01: 幅8m・奥行16mの長方形、床の高さ0、カタパルトは盤面の右外 (4.4, 0.85, -4.5)。
     fn stage() -> Stage {
         ron::from_str::<StageAsset>(include_str!("../../assets/data/stages/stage_01.stage.ron"))
             .expect("valid RON")
@@ -1245,20 +1277,58 @@ mod tests {
             .expect("valid stage")
     }
 
-    const CATAPULT: Vec3 = Vec3::new(0.0, 0.6, 5.8);
-
+    /// 盤面の上なら止めて置く（`Some(位置)`）。外ならカタパルトの口から、
+    /// 今の向きで転がし出す（`None`）。
     #[rstest]
-    #[case::here_on_the_board(SpawnAt::Here, Vec3::new(1.0, -20.0, 2.0), Vec3::new(1.0, SAFE_HEIGHT, 2.0))]
-    #[case::sky_on_the_board(SpawnAt::Sky, Vec3::new(-3.0, 4.0, -7.0), Vec3::new(-3.0, SKY_HEIGHT, -7.0))]
-    #[case::here_off_the_board(SpawnAt::Here, Vec3::new(4.5, -20.0, 0.0), CATAPULT)]
-    #[case::sky_off_the_board(SpawnAt::Sky, Vec3::new(0.0, 0.0, 8.5), CATAPULT)]
-    #[case::catapult(SpawnAt::Catapult, Vec3::new(1.0, 0.0, 1.0), CATAPULT)]
+    #[case::here_on_the_board(SpawnAt::Here, Vec3::new(1.0, -20.0, 2.0), Some(Vec3::new(1.0, SAFE_HEIGHT, 2.0)))]
+    #[case::sky_on_the_board(SpawnAt::Sky, Vec3::new(-3.0, 4.0, -7.0), Some(Vec3::new(-3.0, SKY_HEIGHT, -7.0)))]
+    #[case::here_off_the_board(SpawnAt::Here, Vec3::new(4.5, -20.0, 0.0), None)]
+    #[case::sky_off_the_board(SpawnAt::Sky, Vec3::new(0.0, 0.0, 8.5), None)]
+    #[case::catapult(SpawnAt::Catapult, Vec3::new(1.0, 0.0, 1.0), None)]
     fn spawn_points_stay_above_the_board(
         #[case] at: SpawnAt,
         #[case] here: Vec3,
-        #[case] expected: Vec3,
+        #[case] placed: Option<Vec3>,
     ) {
-        assert_eq!(spawn_point(at, here, &stage()), expected);
+        let stage = stage();
+        let yaw = 0.3;
+        let c = stage.catapult();
+        let expected = placed.map_or((c.position(), c.launch_velocity(yaw)), |p| (p, Vec3::ZERO));
+        assert_eq!(spawn_point(at, here, &stage, yaw), expected);
+    }
+
+    /// カタパルトの口から転がし出したメダルは、盤面の内側へ向かう。
+    #[rstest]
+    #[case::near_end(-0.6)]
+    #[case::center(0.0)]
+    #[case::far_end(0.6)]
+    fn the_catapult_rolls_medals_onto_the_board(#[case] yaw: f32) {
+        let stage = stage();
+        let (from, velocity) = spawn_point(SpawnAt::Catapult, Vec3::ZERO, &stage, yaw);
+        let ahead = from + Vec3::new(velocity.x, 0.0, velocity.z).normalize() * 2.0;
+        assert!(on_board(&stage, ahead), "{ahead} is on the board");
+    }
+
+    /// 転がるメダル: 軸は水平で進行方向に直交し、接地点が止まる（v = ω × 上向きの半径）。
+    #[rstest]
+    #[case::to_the_left(Vec3::new(-4.0, -0.5, 0.0))]
+    #[case::diagonal(Vec3::new(-3.0, 0.0, 2.0))]
+    fn a_rolling_medal_stands_on_its_edge_without_slipping(#[case] velocity: Vec3) {
+        let radius = 0.28;
+        let (rotation, angular) = rolling(velocity, radius);
+        let axis = rotation * Vec3::Y;
+        let flat = Vec3::new(velocity.x, 0.0, velocity.z);
+        assert!(axis.y.abs() < 1e-5, "axis is horizontal: {axis}");
+        assert!(axis.dot(flat).abs() < 1e-4, "axis is across the motion: {axis}");
+        let contact = angular.cross(Vec3::Y * radius);
+        assert!(contact.distance(flat) < 1e-4, "rolls without slipping: {contact}");
+    }
+
+    #[rstest]
+    #[case::still(Vec3::ZERO)]
+    #[case::straight_down(Vec3::new(0.0, -3.0, 0.0))]
+    fn a_medal_without_horizontal_motion_lies_flat(#[case] velocity: Vec3) {
+        assert_eq!(rolling(velocity, 0.28), (Quat::IDENTITY, Vec3::ZERO));
     }
 
     fn due(index: usize, at: u64, every: Option<u64>) -> (usize, Tick, Option<Ticks>) {
